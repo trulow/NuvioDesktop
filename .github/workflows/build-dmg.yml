@@ -1,8 +1,23 @@
-name: Build macOS DMG
+name: Build & Release macOS DMG
 
-# Run manually from the Actions tab (no push trigger, so it won't fire on every commit)
+# Run manually from the Actions tab. Pick a bump type, or type an explicit
+# version to override auto-increment.
 on:
   workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (ignored if 'version' is filled in)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "Explicit version e.g. 1.4.0 (leave blank to auto-bump)"
+        type: string
+        default: ""
+
+# Needed so the workflow can create tags and releases on your fork
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -15,12 +30,36 @@ jobs:
           submodules: false   # repo's .gitmodules has a broken 'libass-android'
                               # entry; recursing all submodules fails, so we don't
 
+      - name: Determine version
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if [ -n "${{ inputs.version }}" ]; then
+            NEW="${{ inputs.version }}"
+            echo "Using explicit version: $NEW"
+          else
+            # Latest release tag on this repo, e.g. v1.2.3 (fall back to v0.0.0)
+            LATEST="$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
+            [ -z "$LATEST" ] && LATEST="v0.0.0"
+            CUR="${LATEST#v}"
+            MAJOR="$(echo "$CUR" | cut -d. -f1)"; MAJOR="${MAJOR:-0}"
+            MINOR="$(echo "$CUR" | cut -d. -f2)"; MINOR="${MINOR:-0}"
+            PATCH="$(echo "$CUR" | cut -d. -f3)"; PATCH="${PATCH:-0}"
+            case "${{ inputs.bump }}" in
+              major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+              *)     PATCH=$((PATCH+1)) ;;
+            esac
+            NEW="${MAJOR}.${MINOR}.${PATCH}"
+            echo "Latest release: $LATEST  ->  new version: $NEW"
+          fi
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW"    >> "$GITHUB_OUTPUT"
+
       - name: Fetch MPVKit (Nuvio branch) directly — bypass the broken .gitmodules
         run: |
-          # The repo's .gitmodules has a malformed 'libass-android' entry that
-          # breaks every `git submodule` command. We sidestep the submodule
-          # subsystem entirely: drop the empty submodule dir and clone MPVKit
-          # straight into the path the build expects (./MPVKit).
           rm -rf MPVKit
           git clone --recurse-submodules --branch Nuvio \
             https://github.com/NuvioMedia/MPVKit.git MPVKit
@@ -39,33 +78,51 @@ jobs:
           make build platform=macos
 
       - name: Create empty local.properties
+        run: touch local.properties
+
+      - name: Inspect how the build script sets its version
         run: |
-          # The build's generateRuntimeConfigs task requires local.properties to
-          # exist. It's gitignored (machine-specific), so it's absent on a fresh
-          # checkout. An empty file satisfies the presence check; if a specific
-          # key is actually required, the build will name it and we add it here.
-          touch local.properties
+          echo "=== version-related lines in composeApp/build.gradle.kts ==="
+          grep -n -iE 'version|nativeDistributions|packageVersion' composeApp/build.gradle.kts || true
 
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
-        # project version is "unspecified", which jpackage rejects (first digit
-        # must be >= 1). Supply a valid version; Compose uses it for the bundle.
-        run: ./gradlew :composeApp:packageDmg -Pversion=1.0.0
+        run: |
+          # -Pversion only set the root project's version; the composeApp module
+          # stayed "unspecified", so jpackage still got an invalid version.
+          # An init script forces the version on EVERY project, and Compose's
+          # packageVersion defaults to project.version.
+          echo 'allprojects { version = "${{ steps.ver.outputs.version }}" }' > force-version.init.gradle.kts
+          ./gradlew :composeApp:packageDmg --init-script force-version.init.gradle.kts
 
       - name: Show jpackage logs on failure
         if: failure()
         run: |
           echo "===== jpackage ERROR log ====="
-          cat composeApp/build/compose/logs/createDistributable/*-err.txt 2>/dev/null || echo "(no err log found)"
-          echo
+          cat composeApp/build/compose/logs/createDistributable/*-err.txt 2>/dev/null || echo "(none)"
           echo "===== jpackage OUTPUT log ====="
-          cat composeApp/build/compose/logs/createDistributable/*-out.txt 2>/dev/null || echo "(no out log found)"
-          echo
-          echo "===== resolved project version ====="
-          ./gradlew :composeApp:properties -q 2>/dev/null | grep -i '^version:' || true
+          cat composeApp/build/compose/logs/createDistributable/*-out.txt 2>/dev/null || echo "(none)"
 
-      - name: Upload DMG as artifact
+      - name: Rename DMG with version
+        id: dmg
+        run: |
+          SRC="$(ls composeApp/build/compose/binaries/main/dmg/*.dmg | head -n1)"
+          DEST="NuvioDesktop-${{ steps.ver.outputs.version }}.dmg"
+          cp "$SRC" "$DEST"
+          echo "path=$DEST" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG as build artifact
         uses: actions/upload-artifact@v4
         with:
           name: NuvioDesktop-dmg
-          path: composeApp/build/compose/binaries/main/dmg/*.dmg
+          path: ${{ steps.dmg.outputs.path }}
           if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            "${{ steps.dmg.outputs.path }}" \
+            --title "NuvioDesktop ${{ steps.ver.outputs.version }}" \
+            --notes "Automated non-minified build of the Dev branch." \
+            --target Dev
