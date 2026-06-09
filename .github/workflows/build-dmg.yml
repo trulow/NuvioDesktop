@@ -121,13 +121,22 @@ jobs:
         # No version flag needed: the build reads MARKETING_VERSION from the xcconfig.
         run: ./gradlew :composeApp:packageDmg
 
-      - name: Show jpackage logs on failure
+      - name: Show jpackage logs + resolved version on failure
         if: failure()
         run: |
           echo "===== jpackage ERROR log ====="
           cat composeApp/build/compose/logs/createDistributable/*-err.txt 2>/dev/null || echo "(none)"
           echo "===== jpackage OUTPUT log ====="
           cat composeApp/build/compose/logs/createDistributable/*-out.txt 2>/dev/null || echo "(none)"
+          echo "===== --app-version ACTUALLY passed to jpackage ====="
+          ARGS="composeApp/build/compose/tmp/createDistributable.args.txt"
+          grep -A1 -i 'app-version' "$ARGS" 2>/dev/null || cat "$ARGS" 2>/dev/null || echo "(args file not found)"
+          echo "===== Version.xcconfig as checked out ====="
+          grep -nE 'MARKETING_VERSION|CURRENT_PROJECT_VERSION' iosApp/Configuration/Version.xcconfig 2>/dev/null || true
+          echo "===== build.gradle.kts version resolution (lines 185-235) ====="
+          sed -n '185,235p' composeApp/build.gradle.kts
+          echo "===== build.gradle.kts nativeDistributions / packageVersion (lines 700-720) ====="
+          sed -n '700,720p' composeApp/build.gradle.kts
 
       - name: Rename DMG with version
         id: dmg
