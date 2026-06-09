@@ -37,6 +37,17 @@ jobs:
           submodules: false   # repo's .gitmodules has a broken 'libass-android'
                               # entry; recursing all submodules fails, so we don't
 
+      - name: Find backend config keys (diagnostic — remove later)
+        run: |
+          echo "=== config references in composeApp/build.gradle.kts ==="
+          grep -n -iE 'localhost|supabase|baseurl|base_url|apikey|api_key|anon|getProperty|local\.properties|auth' composeApp/build.gradle.kts || true
+          echo
+          echo "=== template / example config files in repo ==="
+          find . -maxdepth 3 \( -iname 'local.properties*' -o -iname '*.properties.example' -o -iname '*.env*' \) 2>/dev/null | head
+          echo
+          echo "=== CONTRIBUTING / Docs mentioning setup keys ==="
+          grep -rniE 'supabase|local\.properties|anon|base ?url|api ?key' CONTRIBUTING.md Docs 2>/dev/null | head -40 || true
+
       - name: Read & validate version from the xcconfig
         id: ver
         run: |
