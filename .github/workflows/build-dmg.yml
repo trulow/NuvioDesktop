@@ -3,8 +3,24 @@ name: Build & Release macOS DMG
 # Run manually from the Actions tab. The version is NOT set here — it is read
 # from iosApp/Configuration/Version.xcconfig (MARKETING_VERSION), which is the
 # single source of truth. To release a new version, edit that file and commit.
+#
+# VERSION FORMAT (enforced by jpackage / macOS bundles):
+#   - One to three integers separated by dots, first integer >= 1.
+#   - Valid:   1   |   1.0   |   1.0.2
+#   - Invalid: 0.2.4 (leading zero) | x.0.2.4 (letters) | 1.0.2.4 (4 segments)
+#               | 1.0-beta (suffix/letters)
+#   No letters, prefixes, suffixes, or 4th segment are allowed.
+#   For a label like "beta", leave MARKETING_VERSION numeric (e.g. 1.0.2) and
+#   use the optional "label" input when running — it adds the wording to the
+#   release title, tag, and DMG name only (e.g. v1.0.2-beta), never the bundle.
+#   The "Read & validate version" step below rejects bad values up front.
 on:
   workflow_dispatch:
+    inputs:
+      label:
+        description: "Optional label e.g. beta or rc1 (affects release title/tag/DMG name only; MARKETING_VERSION stays numeric). Blank = normal release."
+        type: string
+        default: ""
 
 # Needed so the workflow can create tags and releases on your fork
 permissions:
@@ -39,7 +55,20 @@ jobs:
             exit 1
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VER"    >> "$GITHUB_OUTPUT"
+          # Optional label (e.g. beta): applied to the tag, release title, and
+          # DMG name only. The bundle version (MARKETING_VERSION) stays numeric.
+          LABEL="${{ inputs.label }}"
+          if [ -n "$LABEL" ]; then
+            # tag/filename-safe slug: lowercase, spaces -> '-', keep [a-z0-9.-]
+            SLUG="$(echo "$LABEL" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9.-')"
+            echo "tag=v${VER}-${SLUG}"                  >> "$GITHUB_OUTPUT"
+            echo "title=NuvioDesktop ${VER} (${LABEL})" >> "$GITHUB_OUTPUT"
+            echo "suffix=-${SLUG}"                      >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v${VER}"               >> "$GITHUB_OUTPUT"
+            echo "title=NuvioDesktop ${VER}" >> "$GITHUB_OUTPUT"
+            echo "suffix="                   >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Fetch MPVKit (Nuvio branch) directly — bypass the broken .gitmodules
         run: |
@@ -79,7 +108,7 @@ jobs:
         id: dmg
         run: |
           SRC="$(ls composeApp/build/compose/binaries/main/dmg/*.dmg | head -n1)"
-          DEST="NuvioDesktop-${{ steps.ver.outputs.version }}.dmg"
+          DEST="NuvioDesktop-${{ steps.ver.outputs.version }}${{ steps.ver.outputs.suffix }}.dmg"
           cp "$SRC" "$DEST"
           echo "path=$DEST" >> "$GITHUB_OUTPUT"
 
@@ -101,7 +130,7 @@ jobs:
             gh release upload "$TAG" "$DMG" --clobber
           else
             gh release create "$TAG" "$DMG" \
-              --title "NuvioDesktop ${{ steps.ver.outputs.version }}" \
+              --title "${{ steps.ver.outputs.title }}" \
               --notes "Automated non-minified build of the Dev branch." \
               --target Dev
           fi
