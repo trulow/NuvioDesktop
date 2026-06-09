@@ -1,19 +1,10 @@
 name: Build & Release macOS DMG
 
-# Run manually from the Actions tab. Pick a bump type, or type an explicit
-# version to override auto-increment.
+# Run manually from the Actions tab. The version is NOT set here — it is read
+# from iosApp/Configuration/Version.xcconfig (MARKETING_VERSION), which is the
+# single source of truth. To release a new version, edit that file and commit.
 on:
   workflow_dispatch:
-    inputs:
-      bump:
-        description: "Version bump (ignored if 'version' is filled in)"
-        type: choice
-        options: [patch, minor, major]
-        default: patch
-      version:
-        description: "Explicit version e.g. 1.4.0 (leave blank to auto-bump)"
-        type: string
-        default: ""
 
 # Needed so the workflow can create tags and releases on your fork
 permissions:
@@ -30,33 +21,25 @@ jobs:
           submodules: false   # repo's .gitmodules has a broken 'libass-android'
                               # entry; recursing all submodules fails, so we don't
 
-      - name: Determine version
+      - name: Read & validate version from the xcconfig
         id: ver
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          if [ -n "${{ inputs.version }}" ]; then
-            NEW="${{ inputs.version }}"
-            echo "Using explicit version: $NEW"
-          else
-            # Latest release tag on this repo, e.g. v1.2.3 (fall back to v0.0.0)
-            LATEST="$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)"
-            [ -z "$LATEST" ] && LATEST="v0.0.0"
-            CUR="${LATEST#v}"
-            MAJOR="$(echo "$CUR" | cut -d. -f1)"; MAJOR="${MAJOR:-0}"
-            MINOR="$(echo "$CUR" | cut -d. -f2)"; MINOR="${MINOR:-0}"
-            PATCH="$(echo "$CUR" | cut -d. -f3)"; PATCH="${PATCH:-0}"
-            case "${{ inputs.bump }}" in
-              major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
-              minor) MINOR=$((MINOR+1)); PATCH=0 ;;
-              *)     PATCH=$((PATCH+1)) ;;
-            esac
-            NEW="${MAJOR}.${MINOR}.${PATCH}"
-            echo "Latest release: $LATEST  ->  new version: $NEW"
+          XCCFG="iosApp/Configuration/Version.xcconfig"
+          # Pull the value to the right of '=' and strip whitespace
+          VER="$(grep -E '^[[:space:]]*MARKETING_VERSION[[:space:]]*=' "$XCCFG" \
+                  | head -n1 | sed -E 's/.*=[[:space:]]*//' | tr -d '[:space:]')"
+          echo "MARKETING_VERSION read from $XCCFG: '$VER'"
+          # jpackage requires 1-3 integers, first >= 1
+          FIRST="$(echo "$VER" | cut -d. -f1)"
+          if ! echo "$VER" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$' || [ "${FIRST:-0}" -lt 1 ]; then
+            echo "::error::MARKETING_VERSION='$VER' is not valid for the macOS bundle."
+            echo "::error::jpackage needs 1-3 integers separated by dots with the first >= 1 (e.g. 1.0.0)."
+            echo "::error::Edit $XCCFG, set a valid MARKETING_VERSION, commit, and re-run."
+            exit 1
           fi
-          echo "version=$NEW" >> "$GITHUB_OUTPUT"
-          echo "tag=v$NEW"    >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER"    >> "$GITHUB_OUTPUT"
 
       - name: Fetch MPVKit (Nuvio branch) directly — bypass the broken .gitmodules
         run: |
@@ -80,18 +63,8 @@ jobs:
       - name: Create empty local.properties
         run: touch local.properties
 
-      - name: Set a valid app version (the macOS bundler reads it from the xcconfig)
-        run: |
-          # packageVersion comes from MARKETING_VERSION in this iOS xcconfig
-          # (see composeApp/build.gradle.kts line ~711 -> releaseAppVersionName).
-          # The committed value starts with 0, which jpackage rejects. Overwrite
-          # it with our computed version so the first digit is >= 1.
-          XCCFG="iosApp/Configuration/Version.xcconfig"
-          echo "Before:"; grep -E 'MARKETING_VERSION|CURRENT_PROJECT_VERSION' "$XCCFG" || true
-          sed -i '' -E "s/^[[:space:]]*MARKETING_VERSION[[:space:]]*=.*/MARKETING_VERSION = ${{ steps.ver.outputs.version }}/" "$XCCFG"
-          echo "After:";  grep -E 'MARKETING_VERSION|CURRENT_PROJECT_VERSION' "$XCCFG" || true
-
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
+        # No version flag needed: the build reads MARKETING_VERSION from the xcconfig.
         run: ./gradlew :composeApp:packageDmg
 
       - name: Show jpackage logs on failure
@@ -121,8 +94,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.ver.outputs.tag }}" \
-            "${{ steps.dmg.outputs.path }}" \
-            --title "NuvioDesktop ${{ steps.ver.outputs.version }}" \
-            --notes "Automated non-minified build of the Dev branch." \
-            --target Dev
+          TAG="${{ steps.ver.outputs.tag }}"
+          DMG="${{ steps.dmg.outputs.path }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — updating its DMG asset."
+            gh release upload "$TAG" "$DMG" --clobber
+          else
+            gh release create "$TAG" "$DMG" \
+              --title "NuvioDesktop ${{ steps.ver.outputs.version }}" \
+              --notes "Automated non-minified build of the Dev branch." \
+              --target Dev
+          fi
