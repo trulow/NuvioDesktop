@@ -1,8 +1,10 @@
 name: Build & Release macOS DMG
 
 # Run manually from the Actions tab. The version is NOT set here — it is read
-# from iosApp/Configuration/Version.xcconfig (MARKETING_VERSION), which is the
-# single source of truth. To release a new version, edit that file and commit.
+# from composeApp/Configuration/DesktopVersion.properties (VERSION_NAME), the
+# desktop app's own version and the single source of truth. To release a new
+# version, edit that file and commit. (Separate from the iOS MARKETING_VERSION
+# in Version.xcconfig — the macOS bundle version uses VERSION_NAME.)
 #
 # VERSION FORMAT (enforced by jpackage / macOS bundles):
 #   - One to three integers separated by dots, first integer >= 1.
@@ -10,15 +12,15 @@ name: Build & Release macOS DMG
 #   - Invalid: 0.2.4 (leading zero) | x.0.2.4 (letters) | 1.0.2.4 (4 segments)
 #               | 1.0-beta (suffix/letters)
 #   No letters, prefixes, suffixes, or 4th segment are allowed.
-#   For a label like "beta", leave MARKETING_VERSION numeric (e.g. 1.0.2) and
+#   For a label like "beta", leave VERSION_NAME numeric (e.g. 1.0.2) and
 #   use the optional "label" input when running — it adds the wording to the
 #   release title, tag, and DMG name only (e.g. v1.0.2-beta), never the bundle.
-#   The "Read & validate version" step below rejects bad values up front.
+#   The "Read & validate desktop version" step below rejects bad values.
 on:
   workflow_dispatch:
     inputs:
       label:
-        description: "Optional label e.g. beta or rc1 (affects release title/tag/DMG name only; MARKETING_VERSION stays numeric). Blank = normal release."
+        description: "Optional label e.g. beta or rc1 (affects release title/tag/DMG name only; VERSION_NAME stays numeric). Blank = normal release."
         type: string
         default: ""
 
@@ -37,26 +39,26 @@ jobs:
           submodules: false   # repo's .gitmodules has a broken 'libass-android'
                               # entry; recursing all submodules fails, so we don't
 
-      - name: Read & validate version from the xcconfig
+      - name: Read & validate desktop version
         id: ver
         run: |
           set -e
-          XCCFG="iosApp/Configuration/Version.xcconfig"
-          # Pull the value to the right of '=' and strip whitespace
-          VER="$(grep -E '^[[:space:]]*MARKETING_VERSION[[:space:]]*=' "$XCCFG" \
+          PROPS="composeApp/Configuration/DesktopVersion.properties"
+          # Pull VERSION_NAME's value (right of '='), strip whitespace
+          VER="$(grep -E '^[[:space:]]*VERSION_NAME[[:space:]]*=' "$PROPS" \
                   | head -n1 | sed -E 's/.*=[[:space:]]*//' | tr -d '[:space:]')"
-          echo "MARKETING_VERSION read from $XCCFG: '$VER'"
+          echo "VERSION_NAME read from $PROPS: '$VER'"
           # jpackage requires 1-3 integers, first >= 1
           FIRST="$(echo "$VER" | cut -d. -f1)"
           if ! echo "$VER" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$' || [ "${FIRST:-0}" -lt 1 ]; then
-            echo "::error::MARKETING_VERSION='$VER' is not valid for the macOS bundle."
+            echo "::error::VERSION_NAME='$VER' is not valid for the macOS bundle."
             echo "::error::jpackage needs 1-3 integers separated by dots with the first >= 1 (e.g. 1.0.0)."
-            echo "::error::Edit $XCCFG, set a valid MARKETING_VERSION, commit, and re-run."
+            echo "::error::Edit $PROPS, set a valid VERSION_NAME, commit, and re-run."
             exit 1
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           # Optional label (e.g. beta): applied to the tag, release title, and
-          # DMG name only. The bundle version (MARKETING_VERSION) stays numeric.
+          # DMG name only. The bundle version (VERSION_NAME) stays numeric.
           LABEL="${{ inputs.label }}"
           if [ -n "$LABEL" ]; then
             # tag/filename-safe slug: lowercase, spaces -> '-', keep [a-z0-9.-]
@@ -118,12 +120,10 @@ jobs:
           echo "local.properties keys written: $(cut -d= -f1 local.properties | tr '\n' ' ')"
 
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
-        # The macOS bundle version comes from a SEPARATE "desktop version" chain
-        # (composeApp/Configuration/DesktopVersion.properties VERSION_NAME, with a
-        # 0.1.0 fallback) — NOT MARKETING_VERSION. Those start with 0, which
-        # jpackage rejects. Override it via the highest-precedence source, the
-        # nuvio.desktop.versionName Gradle property, with our validated version.
-        run: ./gradlew :composeApp:packageDmg -Pnuvio.desktop.versionName=${{ steps.ver.outputs.version }}
+        # The macOS bundle version comes from DesktopVersion.properties
+        # (VERSION_NAME); the build reads it natively. We validated it above so
+        # jpackage accepts it (first digit >= 1). No override needed.
+        run: ./gradlew :composeApp:packageDmg
 
       - name: Show jpackage logs + resolved version on failure
         if: failure()
