@@ -1,0 +1,53 @@
+name: Sync fork from upstream
+
+# Use THIS instead of GitHub's "Sync fork" button.
+# The UI button does a destructive reset that deletes files which exist only on
+# your fork (like build-dmg.yml). This action MERGES upstream into your branch,
+# so upstream updates come in while your own files are preserved.
+on:
+  workflow_dispatch:
+    inputs:
+      upstream:
+        description: "Upstream repo (owner/name)"
+        type: string
+        default: "NuvioMedia/NuvioDesktop"
+      branch:
+        description: "Branch to sync"
+        type: string
+        default: "Dev"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history needed for a merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Merge upstream — keeps files that exist only on your fork
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/${{ inputs.upstream }}.git"
+          git fetch upstream "${{ inputs.branch }}"
+
+          BEFORE="$(git rev-parse HEAD)"
+          # A merge (not a reset) brings in upstream changes without removing
+          # your fork-only files such as .github/workflows/build-dmg.yml.
+          git merge --no-edit "upstream/${{ inputs.branch }}"
+          AFTER="$(git rev-parse HEAD)"
+
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "Already up to date with upstream — nothing to push."
+          else
+            git push origin "HEAD:${{ inputs.branch }}"
+            echo "Synced: merged upstream/${{ inputs.branch }} into your fork."
+          fi
