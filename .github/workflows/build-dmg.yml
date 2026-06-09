@@ -49,6 +49,18 @@ jobs:
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
         run: ./gradlew :composeApp:packageDmg
 
+      - name: Show jpackage logs on failure
+        if: failure()
+        run: |
+          echo "===== jpackage ERROR log ====="
+          cat composeApp/build/compose/logs/createDistributable/*-err.txt 2>/dev/null || echo "(no err log found)"
+          echo
+          echo "===== jpackage OUTPUT log ====="
+          cat composeApp/build/compose/logs/createDistributable/*-out.txt 2>/dev/null || echo "(no out log found)"
+          echo
+          echo "===== resolved project version ====="
+          ./gradlew :composeApp:properties -q 2>/dev/null | grep -i '^version:' || true
+
       - name: Upload DMG as artifact
         uses: actions/upload-artifact@v4
         with:
