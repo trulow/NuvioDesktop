@@ -1,0 +1,45 @@
+name: Build macOS DMG
+
+# Run manually from the Actions tab (no push trigger, so it won't fire on every commit)
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest   # GitHub's macOS runner controls its own JDK
+    steps:
+      - name: Checkout (Dev branch, with submodules)
+        uses: actions/checkout@v4
+        with:
+          ref: Dev
+          submodules: recursive
+
+      - name: Sync MPVKit submodule to the Nuvio branch
+        run: |
+          git submodule update --init --recursive MPVKit
+          git -C MPVKit remote set-url origin https://github.com/NuvioMedia/MPVKit.git
+          git -C MPVKit fetch origin Nuvio
+          git -C MPVKit switch Nuvio || git -C MPVKit checkout Nuvio
+          git -C MPVKit pull --ff-only || true
+
+      # CI uses JDK 21 — fully supported by Gradle 8.14.3, so no project changes needed
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build MPVKit macOS runtime
+        run: |
+          cd MPVKit
+          make build platform=macos
+
+      - name: Build release DMG
+        run: ./gradlew :composeApp:packageReleaseDmg
+
+      - name: Upload DMG as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NuvioDesktop-dmg
+          path: composeApp/build/compose/binaries/main-release/dmg/*.dmg
+          if-no-files-found: error
