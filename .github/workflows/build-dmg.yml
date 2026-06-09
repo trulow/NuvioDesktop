@@ -15,17 +15,16 @@ jobs:
           submodules: false   # repo's .gitmodules has a broken 'libass-android'
                               # entry; recursing all submodules fails, so we don't
 
-      - name: Init only the MPVKit submodule
+      - name: Fetch MPVKit (Nuvio branch) directly — bypass the broken .gitmodules
         run: |
-          # Scope every git command to MPVKit so the malformed libass-android
-          # entry in .gitmodules is never read. libass-android is Android-only
-          # and not needed for the macOS desktop build.
-          git submodule sync MPVKit
-          git submodule update --init --recursive MPVKit
-          git -C MPVKit remote set-url origin https://github.com/NuvioMedia/MPVKit.git
-          git -C MPVKit fetch origin Nuvio
-          git -C MPVKit switch Nuvio || git -C MPVKit checkout Nuvio
-          git -C MPVKit pull --ff-only || true
+          # The repo's .gitmodules has a malformed 'libass-android' entry that
+          # breaks every `git submodule` command. We sidestep the submodule
+          # subsystem entirely: drop the empty submodule dir and clone MPVKit
+          # straight into the path the build expects (./MPVKit).
+          rm -rf MPVKit
+          git clone --recurse-submodules --branch Nuvio \
+            https://github.com/NuvioMedia/MPVKit.git MPVKit
+          echo "MPVKit checked out at: $(git -C MPVKit rev-parse --short HEAD)"
 
       # CI uses JDK 21 — fully supported by Gradle 8.14.3, so no project changes needed
       - name: Set up JDK 21
