@@ -80,19 +80,19 @@ jobs:
       - name: Create empty local.properties
         run: touch local.properties
 
-      - name: Inspect how the build script sets its version
+      - name: Set a valid app version (the macOS bundler reads it from the xcconfig)
         run: |
-          echo "=== version-related lines in composeApp/build.gradle.kts ==="
-          grep -n -iE 'version|nativeDistributions|packageVersion' composeApp/build.gradle.kts || true
+          # packageVersion comes from MARKETING_VERSION in this iOS xcconfig
+          # (see composeApp/build.gradle.kts line ~711 -> releaseAppVersionName).
+          # The committed value starts with 0, which jpackage rejects. Overwrite
+          # it with our computed version so the first digit is >= 1.
+          XCCFG="iosApp/Configuration/Version.xcconfig"
+          echo "Before:"; grep -E 'MARKETING_VERSION|CURRENT_PROJECT_VERSION' "$XCCFG" || true
+          sed -i '' -E "s/^[[:space:]]*MARKETING_VERSION[[:space:]]*=.*/MARKETING_VERSION = ${{ steps.ver.outputs.version }}/" "$XCCFG"
+          echo "After:";  grep -E 'MARKETING_VERSION|CURRENT_PROJECT_VERSION' "$XCCFG" || true
 
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
-        run: |
-          # -Pversion only set the root project's version; the composeApp module
-          # stayed "unspecified", so jpackage still got an invalid version.
-          # An init script forces the version on EVERY project, and Compose's
-          # packageVersion defaults to project.version.
-          echo 'allprojects { version = "${{ steps.ver.outputs.version }}" }' > force-version.init.gradle.kts
-          ./gradlew :composeApp:packageDmg --init-script force-version.init.gradle.kts
+        run: ./gradlew :composeApp:packageDmg
 
       - name: Show jpackage logs on failure
         if: failure()
