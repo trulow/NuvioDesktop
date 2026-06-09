@@ -38,6 +38,14 @@ jobs:
           cd MPVKit
           make build platform=macos
 
+      - name: Create empty local.properties
+        run: |
+          # The build's generateRuntimeConfigs task requires local.properties to
+          # exist. It's gitignored (machine-specific), so it's absent on a fresh
+          # checkout. An empty file satisfies the presence check; if a specific
+          # key is actually required, the build will name it and we add it here.
+          touch local.properties
+
       - name: Build release DMG
         run: ./gradlew :composeApp:packageReleaseDmg
 
