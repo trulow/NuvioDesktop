@@ -1,26 +1,23 @@
 name: Build & Release macOS DMG
 
-# Run manually from the Actions tab. The version is NOT set here — it is read
-# from composeApp/Configuration/DesktopVersion.properties (VERSION_NAME), the
-# desktop app's own version and the single source of truth. To release a new
-# version, edit that file and commit. (Separate from the iOS MARKETING_VERSION
-# in Version.xcconfig — the macOS bundle version uses VERSION_NAME.)
+# Run manually from the Actions tab. The "version" input sets the version for
+# this build. Leave it BLANK to use the current value in
+# composeApp/Configuration/DesktopVersion.properties (VERSION_NAME) — that value
+# is printed in the run log so you can see what it currently is. (This is the
+# desktop app's own version, separate from the iOS MARKETING_VERSION.)
 #
-# VERSION FORMAT (enforced by jpackage / macOS bundles):
-#   - One to three integers separated by dots, first integer >= 1.
-#   - Valid:   1   |   1.0   |   1.0.2
-#   - Invalid: 0.2.4 (leading zero) | x.0.2.4 (letters) | 1.0.2.4 (4 segments)
-#               | 1.0-beta (suffix/letters)
-#   No letters, prefixes, suffixes, or 4th segment are allowed.
-#   For a label like "beta", leave VERSION_NAME numeric (e.g. 1.0.2) and
-#   use the optional "label" input when running — it adds the wording to the
-#   release title, tag, and DMG name only (e.g. v1.0.2-beta), never the bundle.
-#   The "Read & validate desktop version" step below rejects bad values.
+# VERSION FORMAT:
+#   - The macOS BUNDLE version must be 1-3 integers, first >= 1 (jpackage rule):
+#       Valid: 1 | 1.0 | 1.1.1     Invalid: 0.1.1 (leading zero) | 1.0.2.4
+#   - You MAY append a label, e.g. "1.1.1-alpha": the numeric part (1.1.1) is the
+#     bundle version; the label (alpha) is added to the release tag, title, and
+#     DMG name only (v1.1.1-alpha) — never to the bundle version jpackage sees.
+#   The "Resolve & validate version" step rejects values with no valid numbers.
 on:
   workflow_dispatch:
     inputs:
-      label:
-        description: "Optional label e.g. beta or rc1 (affects release title/tag/DMG name only; VERSION_NAME stays numeric). Blank = normal release."
+      version:
+        description: "Version for this build, e.g. 1.1.1 or 1.1.1-alpha. Leave BLANK to use the current DesktopVersion.properties value (shown in the run log)."
         type: string
         default: ""
 
@@ -39,37 +36,45 @@ jobs:
           submodules: false   # repo's .gitmodules has a broken 'libass-android'
                               # entry; recursing all submodules fails, so we don't
 
-      - name: Read & validate desktop version
+      - name: Resolve & validate version
         id: ver
         run: |
           set -e
           PROPS="composeApp/Configuration/DesktopVersion.properties"
-          # Pull VERSION_NAME's value (right of '='), strip whitespace
-          VER="$(grep -E '^[[:space:]]*VERSION_NAME[[:space:]]*=' "$PROPS" \
-                  | head -n1 | sed -E 's/.*=[[:space:]]*//' | tr -d '[:space:]')"
-          echo "VERSION_NAME read from $PROPS: '$VER'"
-          # jpackage requires 1-3 integers, first >= 1
-          FIRST="$(echo "$VER" | cut -d. -f1)"
-          if ! echo "$VER" | grep -qE '^[0-9]+(\.[0-9]+){0,2}$' || [ "${FIRST:-0}" -lt 1 ]; then
-            echo "::error::VERSION_NAME='$VER' is not valid for the macOS bundle."
-            echo "::error::jpackage needs 1-3 integers separated by dots with the first >= 1 (e.g. 1.0.0)."
-            echo "::error::Edit $PROPS, set a valid VERSION_NAME, commit, and re-run."
+          CURRENT="$(grep -E '^[[:space:]]*VERSION_NAME[[:space:]]*=' "$PROPS" 2>/dev/null \
+                      | head -n1 | sed -E 's/.*=[[:space:]]*//' | tr -d '[:space:]')"
+          echo "Current version in $PROPS: '${CURRENT:-<none>}'"
+
+          RAW="${{ inputs.version }}"
+          if [ -z "$RAW" ]; then
+            RAW="$CURRENT"
+            echo "No version entered — using the current value: '$RAW'"
+          else
+            echo "Version entered: '$RAW'"
+          fi
+
+          # Split into numeric base (the macOS bundle version) + optional label
+          BASE="$(echo "$RAW" | grep -oE '^[0-9]+(\.[0-9]+){0,2}' || true)"
+          LABEL="$(echo "${RAW#$BASE}" | sed -E 's/^[-_. ]+//')"
+          FIRST="$(echo "$BASE" | cut -d. -f1)"
+          if [ -z "$BASE" ] || [ "${FIRST:-0}" -lt 1 ]; then
+            echo "::error::'$RAW' has no valid bundle version. Need 1-3 integers, first >= 1 (e.g. 1.1.1). A label like '-alpha' is optional and applies to the release only."
+            echo "::error::Enter a value in the 'version' input, or set a valid VERSION_NAME in $PROPS."
             exit 1
           fi
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-          # Optional label (e.g. beta): applied to the tag, release title, and
-          # DMG name only. The bundle version (VERSION_NAME) stays numeric.
-          LABEL="${{ inputs.label }}"
+          echo "Building bundle version: $BASE${LABEL:+   label: $LABEL}"
+
+          echo "version=$BASE" >> "$GITHUB_OUTPUT"
           if [ -n "$LABEL" ]; then
             # tag/filename-safe slug: lowercase, spaces -> '-', keep [a-z0-9.-]
             SLUG="$(echo "$LABEL" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9.-')"
-            echo "tag=v${VER}-${SLUG}"                  >> "$GITHUB_OUTPUT"
-            echo "title=NuvioDesktop ${VER} (${LABEL})" >> "$GITHUB_OUTPUT"
-            echo "suffix=-${SLUG}"                      >> "$GITHUB_OUTPUT"
+            echo "tag=v${BASE}-${SLUG}"                  >> "$GITHUB_OUTPUT"
+            echo "title=NuvioDesktop ${BASE} (${LABEL})" >> "$GITHUB_OUTPUT"
+            echo "suffix=-${SLUG}"                       >> "$GITHUB_OUTPUT"
           else
-            echo "tag=v${VER}"               >> "$GITHUB_OUTPUT"
-            echo "title=NuvioDesktop ${VER}" >> "$GITHUB_OUTPUT"
-            echo "suffix="                   >> "$GITHUB_OUTPUT"
+            echo "tag=v${BASE}"               >> "$GITHUB_OUTPUT"
+            echo "title=NuvioDesktop ${BASE}" >> "$GITHUB_OUTPUT"
+            echo "suffix="                    >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fetch MPVKit (Nuvio branch) directly — bypass the broken .gitmodules
@@ -120,10 +125,10 @@ jobs:
           echo "local.properties keys written: $(cut -d= -f1 local.properties | tr '\n' ' ')"
 
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
-        # The macOS bundle version comes from DesktopVersion.properties
-        # (VERSION_NAME); the build reads it natively. We validated it above so
-        # jpackage accepts it (first digit >= 1). No override needed.
-        run: ./gradlew :composeApp:packageDmg
+        # Force the bundle version to the validated numeric base, so jpackage
+        # gets a clean version even when the input carried a label (e.g. -alpha)
+        # or DesktopVersion.properties still holds a 0.x value.
+        run: ./gradlew :composeApp:packageDmg -Pnuvio.desktop.versionName=${{ steps.ver.outputs.version }}
 
       - name: Show jpackage logs + resolved version on failure
         if: failure()
