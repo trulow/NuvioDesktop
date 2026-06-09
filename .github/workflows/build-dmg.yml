@@ -37,17 +37,6 @@ jobs:
           submodules: false   # repo's .gitmodules has a broken 'libass-android'
                               # entry; recursing all submodules fails, so we don't
 
-      - name: Find backend config keys (diagnostic — remove later)
-        run: |
-          echo "=== config references in composeApp/build.gradle.kts ==="
-          grep -n -iE 'localhost|supabase|baseurl|base_url|apikey|api_key|anon|getProperty|local\.properties|auth' composeApp/build.gradle.kts || true
-          echo
-          echo "=== template / example config files in repo ==="
-          find . -maxdepth 3 \( -iname 'local.properties*' -o -iname '*.properties.example' -o -iname '*.env*' \) 2>/dev/null | head
-          echo
-          echo "=== CONTRIBUTING / Docs mentioning setup keys ==="
-          grep -rniE 'supabase|local\.properties|anon|base ?url|api ?key' CONTRIBUTING.md Docs 2>/dev/null | head -40 || true
-
       - name: Read & validate version from the xcconfig
         id: ver
         run: |
@@ -100,8 +89,33 @@ jobs:
           cd MPVKit
           make build platform=macos
 
-      - name: Create empty local.properties
-        run: touch local.properties
+      - name: Write local.properties from repo Secrets (backend config)
+        env:
+          # Set these under: Settings -> Secrets and variables -> Actions
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # Optional extras (leave secrets unset to skip): Trakt, IMDb, etc.
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+          INTRODB_API_URL: ${{ secrets.INTRODB_API_URL }}
+          IMDB_RATINGS_API_BASE_URL: ${{ secrets.IMDB_RATINGS_API_BASE_URL }}
+          IMDB_TAPFRAME_API_BASE_URL: ${{ secrets.IMDB_TAPFRAME_API_BASE_URL }}
+          PREMIUMIZE_CLIENT_ID: ${{ secrets.PREMIUMIZE_CLIENT_ID }}
+        run: |
+          # generateRuntimeConfigs reads these keys; empty SUPABASE_* is what
+          # caused login to hit http://localhost. Only write keys that are set.
+          : > local.properties
+          for KEY in SUPABASE_URL SUPABASE_ANON_KEY TRAKT_CLIENT_ID \
+                     TRAKT_CLIENT_SECRET INTRODB_API_URL \
+                     IMDB_RATINGS_API_BASE_URL IMDB_TAPFRAME_API_BASE_URL \
+                     PREMIUMIZE_CLIENT_ID; do
+            VAL="${!KEY}"
+            [ -n "$VAL" ] && echo "$KEY=$VAL" >> local.properties
+          done
+          if [ -z "${SUPABASE_URL}" ] || [ -z "${SUPABASE_ANON_KEY}" ]; then
+            echo "::warning::SUPABASE_URL and/or SUPABASE_ANON_KEY are empty. Login will fail (falls back to localhost). Add them as repo Secrets."
+          fi
+          echo "local.properties keys written: $(cut -d= -f1 local.properties | tr '\n' ' ')"
 
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
         # No version flag needed: the build reads MARKETING_VERSION from the xcconfig.
