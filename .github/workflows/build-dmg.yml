@@ -118,8 +118,12 @@ jobs:
           echo "local.properties keys written: $(cut -d= -f1 local.properties | tr '\n' ' ')"
 
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
-        # No version flag needed: the build reads MARKETING_VERSION from the xcconfig.
-        run: ./gradlew :composeApp:packageDmg
+        # The macOS bundle version comes from a SEPARATE "desktop version" chain
+        # (composeApp/Configuration/DesktopVersion.properties VERSION_NAME, with a
+        # 0.1.0 fallback) — NOT MARKETING_VERSION. Those start with 0, which
+        # jpackage rejects. Override it via the highest-precedence source, the
+        # nuvio.desktop.versionName Gradle property, with our validated version.
+        run: ./gradlew :composeApp:packageDmg -Pnuvio.desktop.versionName=${{ steps.ver.outputs.version }}
 
       - name: Show jpackage logs + resolved version on failure
         if: failure()
