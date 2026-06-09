@@ -8,14 +8,19 @@ jobs:
   build:
     runs-on: macos-latest   # GitHub's macOS runner controls its own JDK
     steps:
-      - name: Checkout (Dev branch, with submodules)
+      - name: Checkout (Dev branch — submodules handled manually below)
         uses: actions/checkout@v4
         with:
           ref: Dev
-          submodules: recursive
+          submodules: false   # repo's .gitmodules has a broken 'libass-android'
+                              # entry; recursing all submodules fails, so we don't
 
-      - name: Sync MPVKit submodule to the Nuvio branch
+      - name: Init only the MPVKit submodule
         run: |
+          # Scope every git command to MPVKit so the malformed libass-android
+          # entry in .gitmodules is never read. libass-android is Android-only
+          # and not needed for the macOS desktop build.
+          git submodule sync MPVKit
           git submodule update --init --recursive MPVKit
           git -C MPVKit remote set-url origin https://github.com/NuvioMedia/MPVKit.git
           git -C MPVKit fetch origin Nuvio
