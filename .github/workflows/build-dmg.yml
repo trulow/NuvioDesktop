@@ -47,7 +47,9 @@ jobs:
           touch local.properties
 
       - name: Build DMG (non-minified — skips the flaky ProGuard step)
-        run: ./gradlew :composeApp:packageDmg
+        # project version is "unspecified", which jpackage rejects (first digit
+        # must be >= 1). Supply a valid version; Compose uses it for the bundle.
+        run: ./gradlew :composeApp:packageDmg -Pversion=1.0.0
 
       - name: Show jpackage logs on failure
         if: failure()
