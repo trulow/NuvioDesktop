@@ -30,3 +30,12 @@ jobs:
           echo "===== anything that throws in desktop addon init ====="
           grep -rnE 'object .*Addon|init *\{|throw |error\(|require\(|checkNotNull' \
             $(find composeApp/src/desktopMain -iname 'AddonPlatform*.kt' 2>/dev/null) 2>/dev/null || true
+
+            - name: Print DesktopStorage + storage backend
+        run: |
+          echo "===== DesktopStorage*.kt ====="
+          for f in $(find composeApp/src/desktopMain -iname 'DesktopStorage*.kt' -o -iname '*Storage*.kt' 2>/dev/null | grep -i desktop); do
+            echo "########## $f ##########"; cat "$f"; echo
+          done
+          echo "===== storage-related native/db deps in build.gradle.kts ====="
+          grep -niE 'sqlite|sqldelight|datastore|preferences|jna|jni|rocksdb|h2|derby|mapdb|store' composeApp/build.gradle.kts | head -40
