@@ -1,0 +1,32 @@
+name: Inspect source (diagnostic)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest   # no build — just read files, so Linux is fine & fast
+    steps:
+      - name: Checkout Dev
+        uses: actions/checkout@v4
+        with:
+          ref: Dev
+          submodules: false
+
+      - name: Print AddonPlatform desktop source + native references
+        run: |
+          echo "===== AddonPlatform*.kt files (excluding build/) ====="
+          find . -iname 'AddonPlatform*.kt' -not -path '*/build/*' || true
+          echo
+          for f in $(find . -iname 'AddonPlatform*esktop*.kt' -not -path '*/build/*'); do
+            echo "########## $f ##########"
+            cat "$f"
+            echo
+          done
+          echo "===== native loads / resource refs in desktopMain ====="
+          grep -rnoE 'System\.loadLibrary\([^)]*\)|System\.load\([^)]*\)|loadLibrary|\.dylib|\.so\b|javet|j2v8|graaljs|nashorn|rhino|getResourceAsStream|getResource\(|extractResource|libmpv' \
+            composeApp/src/desktopMain 2>/dev/null | head -80 || true
+          echo
+          echo "===== anything that throws in desktop addon init ====="
+          grep -rnE 'object .*Addon|init *\{|throw |error\(|require\(|checkNotNull' \
+            $(find composeApp/src/desktopMain -iname 'AddonPlatform*.kt' 2>/dev/null) 2>/dev/null || true
