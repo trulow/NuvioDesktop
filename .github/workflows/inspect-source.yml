@@ -13,28 +13,26 @@ jobs:
           ref: Dev
           submodules: false
 
-      - name: Print ProfileScopedKey + current-profile source
+      - name: Find desktop main + exception handling
         run: |
-          echo "===== ProfileScopedKey*.kt (all platforms) ====="
-          for f in $(find composeApp/src -iname 'ProfileScopedKey*.kt' 2>/dev/null); do
+          echo "===== desktop main entry point(s) ====="
+          for f in $(find composeApp/src/desktopMain -iname 'Main*.kt' -o -iname '*ain*.kt' 2>/dev/null | sort -u); do
             echo "########## $f ##########"
             cat "$f"
             echo
           done
 
-          echo "===== ProfileContext / current-profile holder (what ProfileScopedKey reads) ====="
-          for f in $(find composeApp/src -iname 'ProfileContext*.kt' -o -iname 'CurrentProfile*.kt' -o -iname 'ActiveProfile*.kt' 2>/dev/null); do
+          echo "===== files containing fun main( in desktopMain (fallback) ====="
+          for f in $(grep -rlE 'fun +main *\(' composeApp/src/desktopMain 2>/dev/null); do
             echo "########## $f ##########"
             cat "$f"
             echo
           done
 
-          echo "===== how 'current/active profile' is referenced across desktopMain + commonMain ====="
-          grep -rnE 'currentProfile|activeProfile|CurrentProfile|ActiveProfile|ProfileContext|requireProfile|error\(|require\(|checkNotNull' \
-            composeApp/src/commonMain composeApp/src/desktopMain 2>/dev/null \
-            | grep -iE 'profile|error|require|checkNotNull' | head -60 || true
+          echo "===== existing uncaught / coroutine exception handling ====="
+          grep -rnE 'setDefaultUncaughtExceptionHandler|UncaughtException|printStackTrace|CoroutineExceptionHandler|runCatching|SupervisorJob' \
+            composeApp/src/desktopMain composeApp/src/commonMain 2>/dev/null | head -50 || true
 
-          echo "===== anything ProfileScopedKey imports/depends on that could throw at init ====="
-          for f in $(find composeApp/src -iname 'ProfileScopedKey*.kt' 2>/dev/null); do
-            grep -nE '^import|object|init \{|by lazy|=\s*[A-Z]' "$f" || true
-          done
+          echo "===== where addons are initialized at startup (App.kt area) ====="
+          grep -rnE 'AddonPlatform|AddonRepository\.initialize|fetchAvatars|AddonStorage|AvatarRepository' \
+            composeApp/src/commonMain 2>/dev/null | head -40 || true
