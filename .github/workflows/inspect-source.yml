@@ -13,27 +13,28 @@ jobs:
           ref: Dev
           submodules: false
 
-      - name: Print DesktopStorage + storage backend
+      - name: Print ProfileScopedKey + current-profile source
         run: |
-          echo "===== DesktopStorage / *Storage* in desktopMain ====="
-          FILES="$(find composeApp/src/desktopMain -iname '*Storage*.kt' 2>/dev/null)"
-          if [ -z "$FILES" ]; then
-            echo "(no *Storage*.kt found in desktopMain — searching wider)"
-            FILES="$(find composeApp/src -iname 'DesktopStorage*.kt' 2>/dev/null)"
-          fi
-          for f in $FILES; do
+          echo "===== ProfileScopedKey*.kt (all platforms) ====="
+          for f in $(find composeApp/src -iname 'ProfileScopedKey*.kt' 2>/dev/null); do
             echo "########## $f ##########"
             cat "$f"
             echo
           done
 
-          echo "===== commonMain DesktopStorage/Storage expect decls (for context) ====="
-          grep -rnE 'expect .*Storage|interface .*Storage|object Storage' composeApp/src/commonMain 2>/dev/null | head -20 || true
-          echo
+          echo "===== ProfileContext / current-profile holder (what ProfileScopedKey reads) ====="
+          for f in $(find composeApp/src -iname 'ProfileContext*.kt' -o -iname 'CurrentProfile*.kt' -o -iname 'ActiveProfile*.kt' 2>/dev/null); do
+            echo "########## $f ##########"
+            cat "$f"
+            echo
+          done
 
-          echo "===== storage-related deps in composeApp/build.gradle.kts ====="
-          grep -niE 'sqlite|sqldelight|datastore|preferences|jna\b|jni|rocksdb|\bh2\b|derby|mapdb|moko|multiplatform-settings|russhwolf|settings' composeApp/build.gradle.kts | head -50 || true
-          echo
+          echo "===== how 'current/active profile' is referenced across desktopMain + commonMain ====="
+          grep -rnE 'currentProfile|activeProfile|CurrentProfile|ActiveProfile|ProfileContext|requireProfile|error\(|require\(|checkNotNull' \
+            composeApp/src/commonMain composeApp/src/desktopMain 2>/dev/null \
+            | grep -iE 'profile|error|require|checkNotNull' | head -60 || true
 
-          echo "===== native loads / resource refs anywhere a static init might hit ====="
-          grep -rnoE 'System\.loadLibrary\([^)]*\)|System\.load\([^)]*\)|\.dylib|\.so\b|sqlite|jdbc' composeApp/src/desktopMain 2>/dev/null | grep -viE 'player|mpv' | head -40 || true
+          echo "===== anything ProfileScopedKey imports/depends on that could throw at init ====="
+          for f in $(find composeApp/src -iname 'ProfileScopedKey*.kt' 2>/dev/null); do
+            grep -nE '^import|object|init \{|by lazy|=\s*[A-Z]' "$f" || true
+          done
