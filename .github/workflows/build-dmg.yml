@@ -1,0 +1,179 @@
+name: Build & Release macOS DMG
+
+# Run manually from the Actions tab. The "version" input sets the version for
+# this build. Leave it BLANK to use the current value in
+# composeApp/Configuration/DesktopVersion.properties (VERSION_NAME) — that value
+# is printed in the run log so you can see what it currently is. (This is the
+# desktop app's own version, separate from the iOS MARKETING_VERSION.)
+#
+# VERSION FORMAT:
+#   - The macOS BUNDLE version must be 1-3 integers, first >= 1 (jpackage rule):
+#       Valid: 1 | 1.0 | 1.1.1     Invalid: 0.1.1 (leading zero) | 1.0.2.4
+#   - You MAY append a label, e.g. "1.1.1-alpha": the numeric part (1.1.1) is the
+#     bundle version; the label (alpha) is added to the release tag, title, and
+#     DMG name only (v1.1.1-alpha) — never to the bundle version jpackage sees.
+#   The "Resolve & validate version" step rejects values with no valid numbers.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for this build, e.g. 1.1.1 or 1.1.1-alpha. Leave BLANK to use the current DesktopVersion.properties value (shown in the run log)."
+        type: string
+        default: ""
+
+# Needed so the workflow can create tags and releases on your fork
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest   # GitHub's macOS runner controls its own JDK
+    steps:
+      - name: Checkout (Dev branch — submodules handled manually below)
+        uses: actions/checkout@v4
+        with:
+          ref: Dev
+          submodules: false   # repo's .gitmodules has a broken 'libass-android'
+                              # entry; recursing all submodules fails, so we don't
+
+      - name: Resolve & validate version
+        id: ver
+        run: |
+          set -e
+          PROPS="composeApp/Configuration/DesktopVersion.properties"
+          CURRENT="$(grep -E '^[[:space:]]*VERSION_NAME[[:space:]]*=' "$PROPS" 2>/dev/null \
+                      | head -n1 | sed -E 's/.*=[[:space:]]*//' | tr -d '[:space:]')"
+          echo "Current version in $PROPS: '${CURRENT:-<none>}'"
+
+          RAW="${{ inputs.version }}"
+          if [ -z "$RAW" ]; then
+            RAW="$CURRENT"
+            echo "No version entered — using the current value: '$RAW'"
+          else
+            echo "Version entered: '$RAW'"
+          fi
+
+          # Split into numeric base (the macOS bundle version) + optional label
+          BASE="$(echo "$RAW" | grep -oE '^[0-9]+(\.[0-9]+){0,2}' || true)"
+          LABEL="$(echo "${RAW#$BASE}" | sed -E 's/^[-_. ]+//')"
+          FIRST="$(echo "$BASE" | cut -d. -f1)"
+          if [ -z "$BASE" ] || [ "${FIRST:-0}" -lt 1 ]; then
+            echo "::error::'$RAW' has no valid bundle version. Need 1-3 integers, first >= 1 (e.g. 1.1.1). A label like '-alpha' is optional and applies to the release only."
+            echo "::error::Enter a value in the 'version' input, or set a valid VERSION_NAME in $PROPS."
+            exit 1
+          fi
+          echo "Building bundle version: $BASE${LABEL:+   label: $LABEL}"
+
+          echo "version=$BASE" >> "$GITHUB_OUTPUT"
+          if [ -n "$LABEL" ]; then
+            # tag/filename-safe slug: lowercase, spaces -> '-', keep [a-z0-9.-]
+            SLUG="$(echo "$LABEL" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9.-')"
+            echo "tag=v${BASE}-${SLUG}"                  >> "$GITHUB_OUTPUT"
+            echo "title=NuvioDesktop ${BASE} (${LABEL})" >> "$GITHUB_OUTPUT"
+            echo "suffix=-${SLUG}"                       >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v${BASE}"               >> "$GITHUB_OUTPUT"
+            echo "title=NuvioDesktop ${BASE}" >> "$GITHUB_OUTPUT"
+            echo "suffix="                    >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch MPVKit (Nuvio branch) directly — bypass the broken .gitmodules
+        run: |
+          rm -rf MPVKit
+          git clone --recurse-submodules --branch Nuvio \
+            https://github.com/NuvioMedia/MPVKit.git MPVKit
+          echo "MPVKit checked out at: $(git -C MPVKit rev-parse --short HEAD)"
+
+      # CI uses JDK 21 — fully supported by Gradle 8.14.3, so no project changes needed
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build MPVKit macOS runtime
+        run: |
+          cd MPVKit
+          make build platform=macos
+
+      - name: Write local.properties from repo Secrets (backend config)
+        env:
+          # Set these under: Settings -> Secrets and variables -> Actions
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # Optional extras (leave secrets unset to skip): Trakt, IMDb, etc.
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+          INTRODB_API_URL: ${{ secrets.INTRODB_API_URL }}
+          IMDB_RATINGS_API_BASE_URL: ${{ secrets.IMDB_RATINGS_API_BASE_URL }}
+          IMDB_TAPFRAME_API_BASE_URL: ${{ secrets.IMDB_TAPFRAME_API_BASE_URL }}
+          PREMIUMIZE_CLIENT_ID: ${{ secrets.PREMIUMIZE_CLIENT_ID }}
+        run: |
+          # generateRuntimeConfigs reads these keys; empty SUPABASE_* is what
+          # caused login to hit http://localhost. Only write keys that are set.
+          : > local.properties
+          for KEY in SUPABASE_URL SUPABASE_ANON_KEY TRAKT_CLIENT_ID \
+                     TRAKT_CLIENT_SECRET INTRODB_API_URL \
+                     IMDB_RATINGS_API_BASE_URL IMDB_TAPFRAME_API_BASE_URL \
+                     PREMIUMIZE_CLIENT_ID; do
+            VAL="${!KEY}"
+            [ -n "$VAL" ] && echo "$KEY=$VAL" >> local.properties
+          done
+          if [ -z "${SUPABASE_URL}" ] || [ -z "${SUPABASE_ANON_KEY}" ]; then
+            echo "::warning::SUPABASE_URL and/or SUPABASE_ANON_KEY are empty. Login will fail (falls back to localhost). Add them as repo Secrets."
+          fi
+          echo "local.properties keys written: $(cut -d= -f1 local.properties | tr '\n' ' ')"
+
+      - name: Build DMG (non-minified — skips the flaky ProGuard step)
+        # Force the bundle version to the validated numeric base, so jpackage
+        # gets a clean version even when the input carried a label (e.g. -alpha)
+        # or DesktopVersion.properties still holds a 0.x value.
+        run: ./gradlew :composeApp:packageDmg -Pnuvio.desktop.versionName=${{ steps.ver.outputs.version }}
+
+      - name: Show jpackage logs + resolved version on failure
+        if: failure()
+        run: |
+          echo "===== jpackage ERROR log ====="
+          cat composeApp/build/compose/logs/createDistributable/*-err.txt 2>/dev/null || echo "(none)"
+          echo "===== jpackage OUTPUT log ====="
+          cat composeApp/build/compose/logs/createDistributable/*-out.txt 2>/dev/null || echo "(none)"
+          echo "===== --app-version ACTUALLY passed to jpackage ====="
+          ARGS="composeApp/build/compose/tmp/createDistributable.args.txt"
+          grep -A1 -i 'app-version' "$ARGS" 2>/dev/null || cat "$ARGS" 2>/dev/null || echo "(args file not found)"
+          echo "===== Version.xcconfig as checked out ====="
+          grep -nE 'MARKETING_VERSION|CURRENT_PROJECT_VERSION' iosApp/Configuration/Version.xcconfig 2>/dev/null || true
+          echo "===== build.gradle.kts version resolution (lines 185-235) ====="
+          sed -n '185,235p' composeApp/build.gradle.kts
+          echo "===== build.gradle.kts nativeDistributions / packageVersion (lines 700-720) ====="
+          sed -n '700,720p' composeApp/build.gradle.kts
+
+      - name: Rename DMG with version
+        id: dmg
+        run: |
+          SRC="$(ls composeApp/build/compose/binaries/main/dmg/*.dmg | head -n1)"
+          DEST="NuvioDesktop-${{ steps.ver.outputs.version }}${{ steps.ver.outputs.suffix }}.dmg"
+          cp "$SRC" "$DEST"
+          echo "path=$DEST" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NuvioDesktop-dmg
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          DMG="${{ steps.dmg.outputs.path }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — updating its DMG asset."
+            gh release upload "$TAG" "$DMG" --clobber
+          else
+            gh release create "$TAG" "$DMG" \
+              --title "${{ steps.ver.outputs.title }}" \
+              --notes "Automated non-minified build of the Dev branch." \
+              --target Dev
+          fi

@@ -1,0 +1,102 @@
+name: Sync fork from upstream
+
+# Use THIS instead of GitHub's "Sync fork" button.
+#
+# This workflow makes your fork an EXACT MIRROR of upstream — anything upstream
+# added, changed, or deleted is applied to your fork — EXCEPT the paths listed
+# in PROTECTED_PATHS below, which are preserved exactly as they exist on your
+# fork.
+#
+# Note: because this rewrites your branch to match upstream's history (plus one
+# commit restoring your protected files), it uses a force-push. Don't keep
+# other fork-only changes outside PROTECTED_PATHS — they will be overwritten.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream:
+        description: "Upstream repo (owner/name)"
+        type: string
+        default: "NuvioMedia/NuvioDesktop"
+      branch:
+        description: "Branch to sync"
+        type: string
+        default: "Dev"
+
+env:
+  # ============================================================
+  # Files and directories to KEEP from your fork.
+  # One path per line, relative to the repo root.
+  # Directories are allowed too (e.g. "docs/my-notes").
+  # Anything NOT listed here will be overwritten by upstream.
+  # ============================================================
+  PROTECTED_PATHS: |
+    .github/workflows/build-dmg.yml
+    .github/workflows/inspect-source.yml
+    .github/workflows/sync-fork.yml
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history needed)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Mirror upstream, preserving protected paths
+        run: |
+          set -euo pipefail
+          BRANCH="${{ inputs.branch }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/${{ inputs.upstream }}.git"
+          git fetch upstream "$BRANCH"
+
+          # --- 1. Save protected paths from the fork to a temp dir ---
+          TMP="$(mktemp -d)"
+          while IFS= read -r p; do
+            p="$(echo "$p" | xargs)"          # trim whitespace
+            [ -z "$p" ] && continue
+            if [ -e "$p" ]; then
+              mkdir -p "$TMP/$(dirname "$p")"
+              cp -a "$p" "$TMP/$p"
+              echo "Protected: $p"
+            else
+              echo "Note: protected path '$p' not found in fork — skipping"
+            fi
+          done <<< "$PROTECTED_PATHS"
+
+          # --- 2. Make the branch an exact mirror of upstream ---
+          git reset --hard "upstream/$BRANCH"
+
+          # --- 3. Restore the protected paths on top ---
+          while IFS= read -r p; do
+            p="$(echo "$p" | xargs)"
+            [ -z "$p" ] && continue
+            if [ -e "$TMP/$p" ]; then
+              mkdir -p "$(dirname "$p")"
+              rm -rf "$p"
+              cp -a "$TMP/$p" "$p"
+            fi
+          done <<< "$PROTECTED_PATHS"
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Restore fork-protected files after upstream sync"
+          fi
+
+          # --- 4. Push only if the result differs from what's on origin ---
+          if [ "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "origin/$BRANCH^{tree}")" ]; then
+            echo "Fork already matches upstream + protected files — nothing to push."
+          else
+            git push --force origin "HEAD:$BRANCH"
+            echo "Synced: fork now mirrors upstream/$BRANCH with protected files preserved."
+          fi

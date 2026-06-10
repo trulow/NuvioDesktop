@@ -1,0 +1,38 @@
+name: Inspect source (diagnostic)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest   # no build — just read files, so Linux is fine & fast
+    steps:
+      - name: Checkout Dev
+        uses: actions/checkout@v4
+        with:
+          ref: Dev
+          submodules: false
+
+      - name: Find desktop main + exception handling
+        run: |
+          echo "===== desktop main entry point(s) ====="
+          for f in $(find composeApp/src/desktopMain -iname 'Main*.kt' -o -iname '*ain*.kt' 2>/dev/null | sort -u); do
+            echo "########## $f ##########"
+            cat "$f"
+            echo
+          done
+
+          echo "===== files containing fun main( in desktopMain (fallback) ====="
+          for f in $(grep -rlE 'fun +main *\(' composeApp/src/desktopMain 2>/dev/null); do
+            echo "########## $f ##########"
+            cat "$f"
+            echo
+          done
+
+          echo "===== existing uncaught / coroutine exception handling ====="
+          grep -rnE 'setDefaultUncaughtExceptionHandler|UncaughtException|printStackTrace|CoroutineExceptionHandler|runCatching|SupervisorJob' \
+            composeApp/src/desktopMain composeApp/src/commonMain 2>/dev/null | head -50 || true
+
+          echo "===== where addons are initialized at startup (App.kt area) ====="
+          grep -rnE 'AddonPlatform|AddonRepository\.initialize|fetchAvatars|AddonStorage|AvatarRepository' \
+            composeApp/src/commonMain 2>/dev/null | head -40 || true
