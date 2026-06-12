@@ -1,16 +1,13 @@
 name: Sync fork from upstream
 
 # Use THIS instead of GitHub's "Sync fork" button.
+# The UI button does a destructive reset that deletes files which exist only on
+# your fork (like build-dmg.yml). This action MERGES upstream into your branch,
+# so upstream updates come in while your own files are preserved.
 #
-# This workflow makes your fork an EXACT MIRROR of upstream — anything upstream
-# added, changed, or deleted is applied to your fork — EXCEPT the paths listed
-# in PROTECTED_PATHS below, which are preserved exactly as they exist on your
-# fork.
-#
-# Note: because this rewrites your branch to match upstream's history (plus one
-# commit restoring your protected files), it uses a force-push. Don't keep
-# other fork-only changes outside PROTECTED_PATHS — they will be overwritten.
-
+# NOTE: uses a Personal Access Token (secret SYNC_TOKEN) with `repo` + `workflow`
+# scope. This is required because upstream ships files under .github/workflows/,
+# and the built-in GITHUB_TOKEN is not allowed to push workflow-file changes.
 on:
   workflow_dispatch:
     inputs:
@@ -23,18 +20,6 @@ on:
         type: string
         default: "Dev"
 
-env:
-  # ============================================================
-  # Files and directories to KEEP from your fork.
-  # One path per line, relative to the repo root.
-  # Directories are allowed too (e.g. "docs/my-notes").
-  # Anything NOT listed here will be overwritten by upstream.
-  # ============================================================
-  PROTECTED_PATHS: |
-    .github/workflows/build-dmg.yml
-    .github/workflows/inspect-source.yml
-    .github/workflows/sync-fork.yml
-
 permissions:
   contents: write
 
@@ -42,61 +27,33 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout fork (full history needed)
+      - name: Checkout fork (full history needed for a merge)
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch }}
           fetch-depth: 0
-          token: ${{ github.token }}
+          # PAT with `workflow` scope — lets the merge push upstream's
+          # .github/workflows/* changes, which GITHUB_TOKEN cannot.
+          token: ${{ secrets.SYNC_TOKEN }}
 
-      - name: Mirror upstream, preserving protected paths
+      - name: Merge upstream — keeps files that exist only on your fork
         run: |
-          set -euo pipefail
-          BRANCH="${{ inputs.branch }}"
-
+          set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git remote add upstream "https://github.com/${{ inputs.upstream }}.git"
-          git fetch upstream "$BRANCH"
+          git fetch upstream "${{ inputs.branch }}"
 
-          # --- 1. Save protected paths from the fork to a temp dir ---
-          TMP="$(mktemp -d)"
-          while IFS= read -r p; do
-            p="$(echo "$p" | xargs)"          # trim whitespace
-            [ -z "$p" ] && continue
-            if [ -e "$p" ]; then
-              mkdir -p "$TMP/$(dirname "$p")"
-              cp -a "$p" "$TMP/$p"
-              echo "Protected: $p"
-            else
-              echo "Note: protected path '$p' not found in fork — skipping"
-            fi
-          done <<< "$PROTECTED_PATHS"
+          BEFORE="$(git rev-parse HEAD)"
+          # A merge (not a reset) brings in upstream changes without removing
+          # your fork-only files such as .github/workflows/build-dmg.yml.
+          git merge --no-edit "upstream/${{ inputs.branch }}"
+          AFTER="$(git rev-parse HEAD)"
 
-          # --- 2. Make the branch an exact mirror of upstream ---
-          git reset --hard "upstream/$BRANCH"
-
-          # --- 3. Restore the protected paths on top ---
-          while IFS= read -r p; do
-            p="$(echo "$p" | xargs)"
-            [ -z "$p" ] && continue
-            if [ -e "$TMP/$p" ]; then
-              mkdir -p "$(dirname "$p")"
-              rm -rf "$p"
-              cp -a "$TMP/$p" "$p"
-            fi
-          done <<< "$PROTECTED_PATHS"
-
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "Restore fork-protected files after upstream sync"
-          fi
-
-          # --- 4. Push only if the result differs from what's on origin ---
-          if [ "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "origin/$BRANCH^{tree}")" ]; then
-            echo "Fork already matches upstream + protected files — nothing to push."
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "Already up to date with upstream — nothing to push."
           else
-            git push --force origin "HEAD:$BRANCH"
-            echo "Synced: fork now mirrors upstream/$BRANCH with protected files preserved."
+            git push origin "HEAD:${{ inputs.branch }}"
+            echo "Synced: merged upstream/${{ inputs.branch }} into your fork."
           fi
