@@ -492,7 +492,7 @@
     <string name="settings_appearance_app_language_sheet_title">Velg språk</string>
     <string name="settings_appearance_continue_watching_description">Innstillinger for Fortsett å se-seksjonen.</string>
     <string name="settings_appearance_liquid_glass">Liquid Glass</string>
-    <string name="settings_appearance_liquid_glass_description">Bruk den innebygde iPhone-fanen i iOS 26 og nyere. Umiddelbar profilbytte fra fanelinjen er ikke tilgjengelig mens dette er på.</string>
+    <string name="settings_appearance_liquid_glass_description">Bruk den innebygde iPhone-fanen i iOS 26 og nyere.</string>
     <string name="settings_appearance_poster_customization_description">Juster kortbredde og hjørneradius.</string>
     <string name="settings_appearance_section_display">VISNING</string>
     <string name="settings_appearance_section_home">HJEM</string>
@@ -1357,6 +1357,7 @@
     <string name="cw_airs_date">Sendes %1$s</string>
     <string name="cw_airs_today">Sendes i dag</string>
     <string name="cw_airs_tomorrow">Sendes i morgen</string>
+    <string name="cw_airs_in_days_format">Sendes om %1$d dager</string>
     <plurals name="cw_airs_in_days">
         <item quantity="one">Sendes om %d dag</item>
         <item quantity="other">Sendes om %d dager</item>
@@ -1364,6 +1365,7 @@
     <string name="cw_airs_date_short">%1$s</string>
     <string name="cw_airs_today_short">I dag</string>
     <string name="cw_airs_tomorrow_short">I morgen</string>
+    <string name="cw_airs_in_days_short_format">Om %1$d dager</string>
     <plurals name="cw_airs_in_days_short">
         <item quantity="one">Om %d dag</item>
         <item quantity="other">Om %d dager</item>

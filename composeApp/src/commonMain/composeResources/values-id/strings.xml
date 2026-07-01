@@ -508,7 +508,7 @@
     <string name="settings_appearance_app_language_sheet_title">Pilih Bahasa</string>
     <string name="settings_appearance_continue_watching_description">Pengaturan untuk bagian Lanjutkan Menonton.</string>
     <string name="settings_appearance_liquid_glass">Liquid Glass</string>
-    <string name="settings_appearance_liquid_glass_description">Gunakan tab bar iPhone asli di iOS 26 dan yang lebih baru. Pergantian profil instan dari tab bar tidak tersedia saat ini aktif.</string>
+    <string name="settings_appearance_liquid_glass_description">Gunakan tab bar iPhone asli di iOS 26 dan yang lebih baru.</string>
     <string name="settings_appearance_poster_customization_description">Sesuaikan lebar kartu dan radius sudut.</string>
     <string name="settings_appearance_section_display">TAMPILAN</string>
     <string name="settings_appearance_section_home">BERANDA</string>
@@ -1433,12 +1433,14 @@
     <string name="cw_airs_date">Tayang %1$s</string>
     <string name="cw_airs_today">Tayang hari ini</string>
     <string name="cw_airs_tomorrow">Tayang besok</string>
+    <string name="cw_airs_in_days_format">Tayang dalam %1$d hari</string>
     <plurals name="cw_airs_in_days">
         <item quantity="other">Tayang dalam %1$d hari</item>
     </plurals>
     <string name="cw_airs_date_short">%1$s</string>
     <string name="cw_airs_today_short">Hari ini</string>
     <string name="cw_airs_tomorrow_short">Besok</string>
+    <string name="cw_airs_in_days_short_format">%1$d hari lagi</string>
     <plurals name="cw_airs_in_days_short">
         <item quantity="other">%1$d hari lagi</item>
     </plurals>

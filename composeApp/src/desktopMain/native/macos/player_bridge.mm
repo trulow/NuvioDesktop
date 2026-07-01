@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import <IOKit/IOKitLib.h>
+#import <IOKit/hidsystem/ev_keymap.h>
 #define GL_SILENCE_DEPRECATION
 #import <OpenGL/OpenGL.h>
 #import <OpenGL/gl3.h>
@@ -16,6 +17,30 @@
 #include <dlfcn.h>
 #include <string>
 #include <vector>
+
+#ifndef NX_SUBTYPE_AUX_CONTROL_BUTTONS
+#define NX_SUBTYPE_AUX_CONTROL_BUTTONS 8
+#endif
+
+#ifndef NX_KEYTYPE_PLAY
+#define NX_KEYTYPE_PLAY 16
+#endif
+
+#ifndef NX_KEYTYPE_NEXT
+#define NX_KEYTYPE_NEXT 17
+#endif
+
+#ifndef NX_KEYTYPE_PREVIOUS
+#define NX_KEYTYPE_PREVIOUS 18
+#endif
+
+#ifndef NX_KEYTYPE_FAST
+#define NX_KEYTYPE_FAST 19
+#endif
+
+#ifndef NX_KEYTYPE_REWIND
+#define NX_KEYTYPE_REWIND 20
+#endif
 
 @class PlayerMetalView;
 @class MpvWebPlayer;
@@ -62,6 +87,7 @@
                    playWhenReady:(BOOL)playWhenReady
                 initialPositionMs:(long long)initialPositionMs
                       controlsUrl:(NSString *)controlsUrl
+                   decoderPriority:(int)decoderPriority
                            javaVm:(JavaVM *)javaVm
                         eventSink:(jobject)eventSink
                       eventMethod:(jmethodID)eventMethod;
@@ -73,6 +99,8 @@
 - (void)seekByMilliseconds:(long long)offsetMs;
 - (void)setSpeed:(double)speed;
 - (double)speed;
+- (void)setVolume:(double)level;
+- (double)volume;
 - (void)setResizeMode:(int)mode;
 - (long long)durationMs;
 - (long long)positionMs;
@@ -97,6 +125,7 @@
 - (void)handleScriptMessage:(NSDictionary *)message;
 - (void)focusControlsWebViewIfNeeded;
 - (void)layoutNativeSubviews;
+- (void)dispatchMediaKeyPlayerEvent:(NSString *)type;
 - (void)layoutControlsWebViewToBounds:(NSRect)bounds immediate:(BOOL)immediate;
 - (void)hostViewBoundsDidChange:(NSNotification *)notification;
 - (void)hostViewFrameDidChange:(NSNotification *)notification;
@@ -112,6 +141,7 @@
 - (void)handleResizeSettleTimer:(NSTimer *)timer;
 - (void)configureHdrForCurrentScreenWithReason:(NSString *)reason force:(BOOL)force;
 - (void)applyHdrForPolledGamma:(NSString *)gamma primaries:(NSString *)primaries reason:(NSString *)reason force:(BOOL)force;
+- (NSEvent *)handleMediaKeyEvent:(NSEvent *)event;
 @end
 
 typedef CFDictionaryRef (*CoreDisplayCreateInfoDictionaryFn)(CGDirectDisplayID displayId);
@@ -996,6 +1026,7 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
     NSTimer *_timer;
     NSTimer *_resizeSettleTimer;
     NSTimer *_fullscreenTransitionTimer;
+    id _mediaKeyMonitor;
     JavaVM *_javaVm;
     jobject _eventSink;
     jmethodID _eventMethod;
@@ -1028,6 +1059,7 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
                    playWhenReady:(BOOL)playWhenReady
                 initialPositionMs:(long long)initialPositionMs
                       controlsUrl:(NSString *)controlsUrl
+                   decoderPriority:(int)decoderPriority
                            javaVm:(JavaVM *)javaVm
                         eventSink:(jobject)eventSink
                       eventMethod:(jmethodID)eventMethod {
@@ -1104,6 +1136,15 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
                                              selector:@selector(windowDidExitFullScreen:)
                                                  name:NSWindowDidExitFullScreenNotification
                                                object:nil];
+    __weak MpvWebPlayer *weakSelf = self;
+    _mediaKeyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskSystemDefined
+                                                            handler:^NSEvent *(NSEvent *event) {
+        MpvWebPlayer *strongSelf = weakSelf;
+        if (!strongSelf) {
+            return event;
+        }
+        return [strongSelf handleMediaKeyEvent:event];
+    }];
     [self layoutNativeSubviews];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self focusControlsWebViewIfNeeded];
@@ -1112,7 +1153,8 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
     [self startMpvWithSource:sourceUrl
                  headerLines:headerLines
                 playWhenReady:playWhenReady
-             initialPositionMs:initialPositionMs];
+             initialPositionMs:initialPositionMs
+              decoderPriority:decoderPriority];
     _timer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                              target:self
                                            selector:@selector(syncControls)
@@ -1350,7 +1392,8 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
 - (void)startMpvWithSource:(NSString *)sourceUrl
                headerLines:(NSArray<NSString *> *)headerLines
               playWhenReady:(BOOL)playWhenReady
-           initialPositionMs:(long long)initialPositionMs {
+           initialPositionMs:(long long)initialPositionMs
+            decoderPriority:(int)decoderPriority {
     _mpv = mpv_create();
     if (!_mpv) {
         @throw [NSException exceptionWithName:@"PlayerBridgeError"
@@ -1365,10 +1408,19 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
     setMpvOptionString(_mpv, "input-vo-keyboard", "no");
     setMpvOptionString(_mpv, "keep-open", "yes");
     setMpvOptionString(_mpv, "vo", "libmpv");
+    setMpvOptionString(_mpv, "ao", "avfoundation,coreaudio,");
+    setMpvOptionString(_mpv, "audio-channels", "auto");
     setMpvOptionString(_mpv, "hwdec", "auto");
     setMpvOptionString(_mpv, "gpu-hwdec-interop", "auto");
     setMpvOptionString(_mpv, "hwdec-codecs", "all");
-    setMpvOptionString(_mpv, "vd-lavc-software-fallback", "yes");
+    if (decoderPriority == 0) {
+        setMpvOptionString(_mpv, "vd-lavc-software-fallback", "no");
+    } else if (decoderPriority == 2) {
+        setMpvOptionString(_mpv, "hwdec", "no");
+        setMpvOptionString(_mpv, "vd-lavc-software-fallback", "yes");
+    } else {
+        setMpvOptionString(_mpv, "vd-lavc-software-fallback", "yes");
+    }
     setMpvOptionString(_mpv, "vd-lavc-threads", "4");
     setMpvOptionString(_mpv, "target-colorspace-hint", "yes");
     setMpvOptionString(_mpv, "target-colorspace-hint-mode", "source");
@@ -1379,14 +1431,20 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
     setMpvOptionString(_mpv, "deband", "yes");
     setMpvOptionString(_mpv, "scale", "spline36");
     setMpvOptionString(_mpv, "cscale", "spline36");
-    setMpvOptionString(_mpv, "demuxer-max-bytes", "64MiB");
-    setMpvOptionString(_mpv, "demuxer-max-back-bytes", "16MiB");
-    setMpvOptionString(_mpv, "demuxer-seekable-cache", "no");
-    setMpvOptionString(_mpv, "cache-secs", "30");
+    setMpvOptionString(_mpv, "demuxer-max-bytes", "512MiB");
+    setMpvOptionString(_mpv, "demuxer-max-back-bytes", "256MiB");
+    setMpvOptionString(_mpv, "demuxer-seekable-cache", "yes");
+    setMpvOptionString(_mpv, "cache-secs", "120");
     setMpvOptionString(_mpv, "hr-seek", "no");
 
     if (headerLines.count > 0) {
-        NSString *headers = [headerLines componentsJoinedByString:@","];
+        NSMutableArray *escaped = [NSMutableArray arrayWithCapacity:headerLines.count];
+        for (NSString *line in headerLines) {
+            NSString *esc = [[line stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+                             stringByReplacingOccurrencesOfString:@"," withString:@"\\,"];
+            [escaped addObject:esc];
+        }
+        NSString *headers = [escaped componentsJoinedByString:@","];
         setMpvOptionString(_mpv, "http-header-fields", headers.UTF8String);
     }
 
@@ -1683,6 +1741,10 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
     _resizeSettleTimer = nil;
     [_fullscreenTransitionTimer invalidate];
     _fullscreenTransitionTimer = nil;
+    if (_mediaKeyMonitor) {
+        [NSEvent removeMonitor:_mediaKeyMonitor];
+        _mediaKeyMonitor = nil;
+    }
     _controlsWebReady = NO;
     _pendingControlsJson = nil;
     if (_mpvEventQueue) {
@@ -1764,13 +1826,34 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
     return [self doubleProperty:"speed" fallback:_cachedSpeed.load()];
 }
 
+- (void)adjustVolume:(double)delta {
+    if (!_mpv) return;
+    double current = [self doubleProperty:"volume" fallback:100.0];
+    double next = fmax(0.0, fmin(100.0, current + delta));
+    mpv_set_property(_mpv, "volume", MPV_FORMAT_DOUBLE, &next);
+}
+
+- (void)setVolume:(double)level {
+    if (!_mpv) return;
+    double next = fmax(0.0, fmin(100.0, level * 100.0));
+    mpv_set_property(_mpv, "volume", MPV_FORMAT_DOUBLE, &next);
+}
+
+- (double)volume {
+    return [self doubleProperty:"volume" fallback:100.0] / 100.0;
+}
+
 - (void)setResizeMode:(int)mode {
     if (!_mpv) return;
     NSString *panscan = @"0.0";
+    NSString *keepAspect = @"yes";
     switch (mode) {
         case 1:
         case 2:
             panscan = @"1.0";
+            break;
+        case 3:
+            keepAspect = @"no";
             break;
         default:
             break;
@@ -1778,6 +1861,7 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
 
     dispatch_queue_t queue = _mpvEventQueue;
     if (!queue) {
+        [self setStringProperty:"keepaspect" value:keepAspect];
         [self setStringProperty:"panscan" value:panscan];
         [self setStringProperty:"video-unscaled" value:@"no"];
         return;
@@ -1788,6 +1872,7 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
         if (!mpv) {
             return;
         }
+        mpv_set_property_string(mpv, "keepaspect", keepAspect.UTF8String);
         mpv_set_property_string(mpv, "panscan", panscan.UTF8String);
         mpv_set_property_string(mpv, "video-unscaled", "no");
     });
@@ -1953,7 +2038,7 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
     double outline = MAX(0.0, MIN(8.0, outlineSize));
     mpv_set_property(_mpv, "sub-outline-size", MPV_FORMAT_DOUBLE, &outline);
 
-    double size = MAX(24.0, MIN(96.0, fontSize));
+    double size = MAX(18.0, MIN(96.0, fontSize));
     mpv_set_property(_mpv, "sub-font-size", MPV_FORMAT_DOUBLE, &size);
 
     int64_t position = MAX(0, MIN(150, subPos));
@@ -2221,6 +2306,66 @@ static void setMpvOptionString(mpv_handle *mpv, const char *name, const char *va
     }
 }
 
+- (NSEvent *)handleMediaKeyEvent:(NSEvent *)event {
+    if (event.type != NSEventTypeSystemDefined || event.subtype != NX_SUBTYPE_AUX_CONTROL_BUTTONS) {
+        return event;
+    }
+
+    NSInteger data = event.data1;
+    int keyCode = (int)((data & 0xFFFF0000) >> 16);
+    NSString *eventType = nil;
+    switch (keyCode) {
+        case NX_KEYTYPE_PLAY:
+            eventType = @"keyboardToggle";
+            break;
+        case NX_KEYTYPE_NEXT:
+        case NX_KEYTYPE_FAST:
+            eventType = @"keyboardSeekForward";
+            break;
+        case NX_KEYTYPE_PREVIOUS:
+        case NX_KEYTYPE_REWIND:
+            eventType = @"keyboardSeekBack";
+            break;
+        default:
+            break;
+    }
+    if (!eventType) {
+        return event;
+    }
+
+    NSWindow *hostWindow = _hostView.window;
+    if (!NSApp.isActive || (hostWindow && NSApp.keyWindow && NSApp.keyWindow != hostWindow)) {
+        return event;
+    }
+
+    int keyFlags = (int)(data & 0x0000FFFF);
+    int keyState = (keyFlags & 0x0000FF00) >> 8;
+    BOOL isKeyDown = keyState == 0x0A;
+    BOOL isRepeat = (keyFlags & 0x1) != 0;
+    if (isKeyDown && !isRepeat) {
+        [self dispatchMediaKeyPlayerEvent:eventType];
+    }
+    return nil;
+}
+
+- (void)dispatchMediaKeyPlayerEvent:(NSString *)type {
+    if (_eventSink && _eventMethod) {
+        [self sendPlayerEvent:type value:0.0];
+        return;
+    }
+
+    if ([type isEqualToString:@"keyboardToggle"]) {
+        [self setPaused:![self isPaused]];
+        [self syncControls];
+    } else if ([type isEqualToString:@"keyboardSeekForward"]) {
+        [self seekByMilliseconds:10 * 1000];
+        [self syncControls];
+    } else if ([type isEqualToString:@"keyboardSeekBack"]) {
+        [self seekByMilliseconds:-10 * 1000];
+        [self syncControls];
+    }
+}
+
 @end
 
 static void runOnMainSync(dispatch_block_t block) {
@@ -2291,6 +2436,8 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     jboolean playWhenReady,
     jlong initialPositionMs,
     jstring controlsPageUrl,
+    jint decoderPriority,
+    jboolean nvidiaRtxSuperResolutionEnabled,
     jobject eventSink
 ) {
     NSView *hostView = (__bridge NSView *)(void *)(intptr_t)hostViewPtr;
@@ -2331,6 +2478,7 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
                    playWhenReady:playWhenReady == JNI_TRUE
                 initialPositionMs:initialPositionMs
                      controlsUrl:[NSString stringWithUTF8String:controls.c_str()]
+                 decoderPriority:decoderPriority
                           javaVm:javaVm
                        eventSink:eventSinkRef
                      eventMethod:eventMethod];
@@ -2434,6 +2582,34 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setSpeed(
     });
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_adjustVolume(
+    JNIEnv * /* env */,
+    jobject /* bridge */,
+    jlong handle,
+    jfloat delta
+) {
+    if (handle == 0) return;
+    MpvWebPlayer *player = (__bridge MpvWebPlayer *)(void *)(intptr_t)handle;
+    runOnMainAsync(^{
+        [player adjustVolume:delta];
+    });
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setVolume(
+    JNIEnv * /* env */,
+    jobject /* bridge */,
+    jlong handle,
+    jfloat level
+) {
+    if (handle == 0) return;
+    MpvWebPlayer *player = (__bridge MpvWebPlayer *)(void *)(intptr_t)handle;
+    runOnMainAsync(^{
+        [player setVolume:level];
+    });
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_durationMs(
     JNIEnv * /* env */,
@@ -2509,6 +2685,17 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_speed(
     if (handle == 0) return 1.0f;
     MpvWebPlayer *player = (__bridge MpvWebPlayer *)(void *)(intptr_t)handle;
     return (jfloat)[player speed];
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_volume(
+    JNIEnv * /* env */,
+    jobject /* bridge */,
+    jlong handle
+) {
+    if (handle == 0) return 1.0f;
+    MpvWebPlayer *player = (__bridge MpvWebPlayer *)(void *)(intptr_t)handle;
+    return (jfloat)[player volume];
 }
 
 extern "C" JNIEXPORT void JNICALL

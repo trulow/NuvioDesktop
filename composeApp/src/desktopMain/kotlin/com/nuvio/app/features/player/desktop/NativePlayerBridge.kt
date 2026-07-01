@@ -9,6 +9,17 @@ internal fun interface NativePlayerEventSink {
 }
 
 internal object NativePlayerBridge {
+    private val windowsNativeRuntimeDependencyNames = listOf(
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll",
+        "msvcp140_codecvt_ids.dll",
+        "concrt140.dll",
+        "WebView2Loader.dll",
+    )
     private val preloadStarted = AtomicBoolean(false)
 
     init {
@@ -22,15 +33,21 @@ internal object NativePlayerBridge {
         playWhenReady: Boolean,
         initialPositionMs: Long,
         controlsPageUrl: String,
+        decoderPriority: Int,
+        nvidiaRtxSuperResolutionEnabled: Boolean,
         eventSink: NativePlayerEventSink,
     ): Long
 
     external fun dispose(handle: Long)
     external fun updateControls(handle: Long, controlsJson: String)
+    external fun requestFocus(handle: Long)
     external fun setPaused(handle: Long, paused: Boolean)
     external fun seekTo(handle: Long, positionMs: Long)
     external fun seekBy(handle: Long, offsetMs: Long)
     external fun setSpeed(handle: Long, speed: Float)
+    external fun adjustVolume(handle: Long, delta: Float)
+    external fun setVolume(handle: Long, level: Float)
+    external fun volume(handle: Long): Float
     external fun setResizeMode(handle: Long, mode: Int)
     external fun durationMs(handle: Long): Long
     external fun positionMs(handle: Long): Long
@@ -52,6 +69,14 @@ internal object NativePlayerBridge {
         captionColorRgb: Int,
         borderColorRgb: Int,
         textColorRgb: Int,
+    )
+    external fun setWindowBorderlessFullscreen(
+        windowHwnd: Long,
+        fullscreen: Boolean,
+        x: Int,
+        y: Int,
+        width: Int,
+        height: Int,
     )
 
     external fun setSubtitleDelayMs(handle: Long, delayMs: Int)
@@ -106,6 +131,7 @@ internal object NativePlayerBridge {
         val platformDir = nativeDirectoryName(platform)
         findLocalBuildLibrary(platformDir, libraryName)?.let { localLibrary ->
             copyLocalRuntimeResources(platformDir, localLibrary.parentFile)
+            loadNativeRuntimeDependencies(platform, localLibrary.parentFile)
             System.load(localLibrary.absolutePath)
             return
         }
@@ -121,7 +147,19 @@ internal object NativePlayerBridge {
         input.use { source ->
             file.outputStream().use { target -> source.copyTo(target) }
         }
+        loadNativeRuntimeDependencies(platform, dir)
         System.load(file.absolutePath)
+    }
+
+    private fun loadNativeRuntimeDependencies(platform: DesktopHostOs, directory: File) {
+        if (platform != DesktopHostOs.WINDOWS) return
+
+        windowsNativeRuntimeDependencyNames.forEach { name ->
+            val dependency = directory.resolve(name)
+            if (dependency.exists()) {
+                System.load(dependency.absolutePath)
+            }
+        }
     }
 
     private fun extractBundledRuntimeResources(platformDir: String, dir: File) {
@@ -281,6 +319,8 @@ internal object NativePlayerBridge {
 
 internal fun preloadNativePlayerBridgeAsync() {
     if (DesktopHostOs.current == DesktopHostOs.MACOS || DesktopHostOs.current == DesktopHostOs.WINDOWS) {
-        NativePlayerBridge.preloadAsync()
+        runCatching {
+            NativePlayerBridge.preloadAsync()
+        }
     }
 }

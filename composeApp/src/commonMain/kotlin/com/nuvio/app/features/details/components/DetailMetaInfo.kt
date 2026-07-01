@@ -40,6 +40,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nuvio.app.core.build.AppFeaturePolicy
+import com.nuvio.app.core.ui.nuvioDesktopDragScroll
 import com.nuvio.app.features.details.MetaDetails
 import com.nuvio.app.features.details.MetaExternalRating
 import com.nuvio.app.features.details.formatRuntimeForDisplay
@@ -197,8 +198,9 @@ fun DetailMetaInfo(
 }
 
 @Composable
-private fun DetailRatingsRow(
+internal fun DetailRatingsRow(
     ratings: List<MetaExternalRating>,
+    modifier: Modifier = Modifier,
 ) {
     val orderedRatings = remember(ratings) {
         val bySource = ratings.associateBy { it.source }
@@ -208,11 +210,13 @@ private fun DetailRatingsRow(
     }
 
     if (orderedRatings.isEmpty()) return
+    val scrollState = rememberScrollState()
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState()),
+            .nuvioDesktopDragScroll(scrollState)
+            .horizontalScroll(scrollState),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp),
     ) {

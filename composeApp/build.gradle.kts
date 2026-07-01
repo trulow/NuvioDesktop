@@ -1,4 +1,3 @@
-import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
@@ -12,9 +11,13 @@ import org.gradle.api.tasks.OutputFile
 import org.gradle.api.tasks.Sync
 import org.gradle.api.tasks.TaskAction
 import org.gradle.jvm.tasks.Jar
+import org.gradle.process.ExecOperations
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
+import java.io.File
 import java.util.Properties
+import javax.inject.Inject
 
 abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:OutputDirectory
@@ -36,6 +39,24 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val desktopAppVersionCode: Property<Int>
 
+    @get:Input
+    abstract val supabaseUrl: Property<String>
+
+    @get:Input
+    abstract val supabaseAnonKey: Property<String>
+
+    @get:Input
+    abstract val nuvioSupabaseUrl: Property<String>
+
+    @get:Input
+    abstract val nuvioSupabaseAnonKey: Property<String>
+
+    @get:Input
+    abstract val syncBackendManifestUrl: Property<String>
+
+    @get:Input
+    abstract val debugBuild: Property<Boolean>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -49,8 +70,19 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |package com.nuvio.app.core.network
                 |
                 |object SupabaseConfig {
-                |    const val URL = "${props.getProperty("SUPABASE_URL", "")}" 
-                |    const val ANON_KEY = "${props.getProperty("SUPABASE_ANON_KEY", "")}" 
+                |    const val URL = "${supabaseUrl.get()}"
+                |    const val ANON_KEY = "${supabaseAnonKey.get()}"
+                |    const val NUVIO_URL = "${nuvioSupabaseUrl.get()}"
+                |    const val NUVIO_ANON_KEY = "${nuvioSupabaseAnonKey.get()}"
+                |}
+                """.trimMargin()
+            )
+            resolve("SyncBackendBootstrapConfig.kt").writeText(
+                """
+                |package com.nuvio.app.core.network
+                |
+                |object SyncBackendBootstrapConfig {
+                |    const val SWITCH_MANIFEST_URL = "${syncBackendManifestUrl.get()}"
                 |}
                 """.trimMargin()
             )
@@ -127,6 +159,15 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |}
                 """.trimMargin()
             )
+            resolve("AppBuildConfig.kt").writeText(
+                """
+                |package com.nuvio.app.core.build
+                |
+                |object AppBuildConfig {
+                |    const val IS_DEBUG_BUILD = ${debugBuild.get()}
+                |}
+                """.trimMargin()
+            )
         }
 
         outDir.resolve("com/nuvio/app/features/settings").apply {
@@ -143,6 +184,111 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 """.trimMargin()
             )
         }
+    }
+}
+
+abstract class NotarizeMacosDmgWithKeychainTask @Inject constructor(
+    private val execOperations: ExecOperations,
+) : DefaultTask() {
+    @get:InputDirectory
+    abstract val dmgDir: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val artifactDir: DirectoryProperty
+
+    @get:Input
+    abstract val finalDmgName: Property<String>
+
+    @get:Input
+    abstract val defaultDmgName: Property<String>
+
+    @get:Input
+    abstract val keychainProfile: Property<String>
+
+    @get:Input
+    abstract val signingIdentity: Property<String>
+
+    init {
+        outputs.upToDateWhen { false }
+    }
+
+    @TaskAction
+    fun notarize() {
+        val profile = keychainProfile.get().trim()
+        require(profile.isNotEmpty()) {
+            "Set NUVIO_MACOS_NOTARY_PASSWORD=@keychain:<profile> or NUVIO_MACOS_NOTARY_KEYCHAIN_PROFILE=<profile>."
+        }
+        val identity = signingIdentity.get().trim()
+        require(identity.isNotEmpty()) {
+            "Set NUVIO_MACOS_SIGNING_IDENTITY to a Developer ID Application identity."
+        }
+
+        val dmg = ensureFinalDmg()
+        signDmg(dmg, identity)
+        execOperations.exec {
+            commandLine(
+                "xcrun",
+                "notarytool",
+                "submit",
+                dmg.absolutePath,
+                "--wait",
+                "--keychain-profile",
+                profile,
+            )
+        }
+        execOperations.exec {
+            commandLine("xcrun", "stapler", "staple", dmg.absolutePath)
+        }
+        publishDmg(dmg)
+        logger.lifecycle("Notarized and stapled macOS DMG: ${dmg.absolutePath}")
+    }
+
+    private fun signDmg(dmg: File, identity: String) {
+        execOperations.exec {
+            commandLine(
+                "codesign",
+                "--force",
+                "--sign",
+                identity,
+                "--timestamp",
+                dmg.absolutePath,
+            )
+        }
+        logger.lifecycle("Signed macOS DMG: ${dmg.absolutePath}")
+    }
+
+    private fun ensureFinalDmg(): File {
+        val outputDir = dmgDir.get().asFile
+        val finalDmg = outputDir.resolve(finalDmgName.get())
+        val defaultDmg = outputDir.resolve(defaultDmgName.get())
+        val sourceDmg = defaultDmg.takeIf { it.exists() }
+            ?: finalDmg.takeIf { it.exists() }
+            ?: error("Expected macOS DMG output in ${outputDir.absolutePath}")
+
+        if (sourceDmg != finalDmg) {
+            if (finalDmg.exists() && !finalDmg.delete()) {
+                error("Could not replace existing DMG: ${finalDmg.absolutePath}")
+            }
+            if (!sourceDmg.renameTo(finalDmg)) {
+                sourceDmg.copyTo(finalDmg, overwrite = true)
+                if (!sourceDmg.delete()) {
+                    logger.warn("Could not delete old DMG after copy: ${sourceDmg.absolutePath}")
+                }
+            }
+        }
+
+        logger.lifecycle("macOS DMG artifact: ${finalDmg.absolutePath}")
+        return finalDmg
+    }
+
+    private fun publishDmg(dmg: File) {
+        val publishedDir = artifactDir.get().asFile
+        publishedDir.mkdirs()
+        val publishedDmg = publishedDir.resolve(dmg.name)
+        if (dmg.canonicalFile != publishedDmg.canonicalFile) {
+            dmg.copyTo(publishedDmg, overwrite = true)
+        }
+        logger.lifecycle("Published macOS DMG artifact: ${publishedDmg.absolutePath}")
     }
 }
 
@@ -198,7 +344,7 @@ fun jpackageCompatibleVersion(version: String): String {
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.androidApplication)
+    alias(libs.plugins.androidKotlinMultiplatformLibrary)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.kotlinxSerialization)
@@ -208,11 +354,6 @@ val supabaseProps = Properties().apply {
     val propsFile = rootProject.file("local.properties")
     if (propsFile.exists()) propsFile.inputStream().use { load(it) }
 }
-val releaseStoreFile = supabaseProps.getProperty("NUVIO_RELEASE_STORE_FILE")?.takeIf { it.isNotBlank() }
-val releaseStorePassword = supabaseProps.getProperty("NUVIO_RELEASE_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
-val releaseKeyAlias = supabaseProps.getProperty("NUVIO_RELEASE_KEY_ALIAS")?.takeIf { it.isNotBlank() }
-val releaseKeyPassword = supabaseProps.getProperty("NUVIO_RELEASE_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
-val releaseKeystore = releaseStoreFile?.let(rootProject::file)
 
 fun localOrEnvProperty(name: String): String? =
     (
@@ -227,6 +368,14 @@ val macosSigningIdentity = localOrEnvProperty("NUVIO_MACOS_SIGNING_IDENTITY")
 val macosNotaryAppleId = localOrEnvProperty("NUVIO_MACOS_NOTARY_APPLE_ID")
 val macosNotaryTeamId = localOrEnvProperty("NUVIO_MACOS_NOTARY_TEAM_ID")
 val macosNotaryPassword = localOrEnvProperty("NUVIO_MACOS_NOTARY_PASSWORD")
+val macosNotaryKeychainProfile = localOrEnvProperty("NUVIO_MACOS_NOTARY_KEYCHAIN_PROFILE")
+    ?: macosNotaryPassword
+        ?.takeIf { it.startsWith("@keychain:", ignoreCase = true) }
+        ?.substringAfter(':')
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+val macosNotaryAppSpecificPassword = macosNotaryPassword
+    ?.takeUnless { it.startsWith("@keychain:", ignoreCase = true) }
 
 val appVersionConfigFile = rootProject.file("iosApp/Configuration/Version.xcconfig")
 val releaseAppVersionName = readXcconfigValue(appVersionConfigFile, "MARKETING_VERSION")
@@ -260,6 +409,7 @@ val desktopReleaseVersionCode = (
     ?.toIntOrNull()
     ?: 1
 val desktopReleasePackageVersion = jpackageCompatibleVersion(desktopReleaseVersionName)
+val windowsMsiUpgradeUuid = "395990ee-9b8a-3548-922c-e7a23a495b8d"
 val iosDistribution = (
     providers.gradleProperty("nuvio.ios.distribution").orNull
         ?: System.getenv("NUVIO_IOS_DISTRIBUTION")
@@ -281,14 +431,79 @@ val generatedRuntimeConfigDir = layout.buildDirectory.dir("generated/runtime-con
 val requestedGradleTasks = gradle.startParameter.taskNames.map { taskName ->
     taskName.substringAfterLast(':').lowercase()
 }
-val isAndroidAppBundleBuild = requestedGradleTasks.any { taskName ->
-    taskName == "bundle" ||
-        taskName == "bundlerelease" ||
-        taskName == "bundledebug" ||
-        taskName.startsWith("bundleplaystore") ||
-        taskName.startsWith("bundlefull") ||
-        taskName.endsWith("bundle")
+val requestedAndroidDistributions = requestedGradleTasks.mapNotNull { taskName ->
+    when {
+        "playstore" in taskName -> "playstore"
+        "full" in taskName -> "full"
+        else -> null
+    }
+}.toSet()
+require(requestedAndroidDistributions.size <= 1) {
+    "Build Android full and playstore distributions separately, or set -Pnuvio.android.distribution=full|playstore."
 }
+val configuredAndroidDistribution = providers.gradleProperty("nuvio.android.distribution").orNull
+    ?: supabaseProps.getProperty("NUVIO_ANDROID_DISTRIBUTION")
+val isAmbiguousAndroidPackageTask = requestedGradleTasks.any { taskName ->
+    taskName == "build" ||
+        taskName.startsWith("assemble") ||
+        taskName.startsWith("bundle")
+} && requestedAndroidDistributions.isEmpty()
+require(configuredAndroidDistribution != null || !isAmbiguousAndroidPackageTask) {
+    "Set -Pnuvio.android.distribution=full|playstore for aggregate Android assemble/bundle tasks."
+}
+val androidDistribution = (
+    configuredAndroidDistribution
+        ?: requestedAndroidDistributions.singleOrNull()
+        ?: "playstore"
+    ).trim().lowercase()
+require(androidDistribution == "playstore" || androidDistribution == "full") {
+    "nuvio.android.distribution must be 'playstore' or 'full'."
+}
+val androidDistributionSourceDir = if (androidDistribution == "full") {
+    "src/androidFull/kotlin"
+} else {
+    "src/androidPlaystore/kotlin"
+}
+val runtimeLocalProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use(::load)
+    }
+}
+
+fun runtimeConfigValue(key: String, fallback: String = ""): String =
+    runtimeLocalProperties.getProperty(key)?.trim()?.takeIf { it.isNotBlank() }
+        ?: providers.environmentVariable(key).orNull?.trim()?.takeIf { it.isNotBlank() }
+        ?: fallback
+
+fun booleanConfigValue(key: String): Boolean? {
+    val rawValue = runtimeLocalProperties.getProperty(key)
+        ?: providers.environmentVariable(key).orNull
+        ?: providers.gradleProperty(key).orNull
+    return rawValue
+        ?.trim()
+        ?.lowercase()
+        ?.let { value ->
+            when (value) {
+                "1", "true", "yes", "y", "debug" -> true
+                "0", "false", "no", "n", "release" -> false
+                else -> null
+            }
+        }
+}
+
+val xcodeConfiguration = providers.environmentVariable("CONFIGURATION").orNull
+    ?.trim()
+    ?.lowercase()
+val kotlinFrameworkBuildType = providers.environmentVariable("KOTLIN_FRAMEWORK_BUILD_TYPE").orNull
+    ?.trim()
+    ?.lowercase()
+val inferredDebugBuild = requestedGradleTasks.any { "debug" in it } ||
+    xcodeConfiguration == "debug" ||
+    kotlinFrameworkBuildType == "debug"
+val isDebugBuild = booleanConfigValue("NUVIO_DEBUG_BUILD")
+    ?: booleanConfigValue("nuvio.debugBuild")
+    ?: inferredDebugBuild
 
 val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generateRuntimeConfigs") {
     outputDir.set(generatedRuntimeConfigDir)
@@ -297,6 +512,12 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     appVersionCode.set(releaseAppVersionCode)
     desktopAppVersionName.set(desktopReleaseVersionName)
     desktopAppVersionCode.set(desktopReleaseVersionCode)
+    supabaseUrl.set(runtimeConfigValue("SUPABASE_URL"))
+    supabaseAnonKey.set(runtimeConfigValue("SUPABASE_ANON_KEY"))
+    nuvioSupabaseUrl.set(runtimeConfigValue("NUVIO_SUPABASE_URL"))
+    nuvioSupabaseAnonKey.set(runtimeConfigValue("NUVIO_SUPABASE_ANON_KEY"))
+    syncBackendManifestUrl.set(runtimeConfigValue("SYNC_BACKEND_MANIFEST_URL"))
+    debugBuild.set(isDebugBuild)
 }
 
 val isMacHost = System.getProperty("os.name").contains("mac", ignoreCase = true)
@@ -304,10 +525,33 @@ val isWindowsHost = System.getProperty("os.name").contains("win", ignoreCase = t
 val mpvKitDir = providers.gradleProperty("nuvio.mpvkit.dir")
     .orElse(rootProject.layout.projectDirectory.dir("MPVKit").asFile.absolutePath)
 val macosPlayerBridgeSource = layout.projectDirectory.file("src/desktopMain/native/macos/player_bridge.mm")
-val macosPlayerBridgeOutput = layout.buildDirectory.file("native/macos/libplayer_bridge.dylib")
-val macosPlayerBridgeArch = when (System.getProperty("os.arch").lowercase()) {
-    "aarch64", "arm64" -> "arm64"
-    else -> "x86_64"
+fun normalizedMacosArch(value: String): String =
+    when (value.lowercase()) {
+        "aarch64", "arm64" -> "arm64"
+        "amd64", "x64", "x86_64" -> "x86_64"
+        else -> error("Unsupported macOS architecture '$value'. Use arm64 or x86_64.")
+    }
+val macosHostJvmArch = normalizedMacosArch(System.getProperty("os.arch"))
+val requestedMacosArch = providers.gradleProperty("nuvio.macos.arch").orNull
+    ?: System.getenv("NUVIO_MACOS_ARCH")
+val macosPlayerBridgeArch = requestedMacosArch?.let(::normalizedMacosArch) ?: macosHostJvmArch
+val isMacosDmgBuildRequested = requestedGradleTasks.any { taskName ->
+    taskName == "packagedmg" ||
+        taskName == "packagereleasedmg" ||
+        taskName == "notarizedmg" ||
+        taskName == "notarizereleasedmg" ||
+        taskName == "notarizereleasedmgwithkeychain"
+}
+if (isMacHost && isMacosDmgBuildRequested && macosPlayerBridgeArch != macosHostJvmArch) {
+    error(
+        "macOS DMG architecture '$macosPlayerBridgeArch' must match the Gradle JVM architecture '$macosHostJvmArch'. " +
+            "Run Gradle with a $macosPlayerBridgeArch JDK/Rosetta, then pass -Pnuvio.macos.arch=$macosPlayerBridgeArch."
+    )
+}
+val macosPlayerBridgeOutput = layout.buildDirectory.file("native/macos/$macosPlayerBridgeArch/libplayer_bridge.dylib")
+val macosDmgArchName = macosPlayerBridgeArch
+val isMacosDmgNotarizationRequested = requestedGradleTasks.any { taskName ->
+    taskName == "notarizedmg" || taskName == "notarizereleasedmg"
 }
 val mpvKitRoot = File(mpvKitDir.get())
 val mpvKitDistRoot = File(mpvKitRoot, "dist")
@@ -426,21 +670,38 @@ val windowsWebView2IncludeDir = File(windowsWebView2Root, "build/native/include"
 val windowsWebView2NativeDir = File(windowsWebView2Root, "build/native/$windowsPlayerBridgeArch")
 val windowsWebView2LoaderLib = File(windowsWebView2NativeDir, "WebView2Loader.dll.lib")
 val windowsWebView2LoaderDll = File(windowsWebView2NativeDir, "WebView2Loader.dll")
-val windowsLibmpvRuntimeDir = providers.gradleProperty("nuvio.windows.libmpv.runtimeDir").orNull
+val bundledWindowsLibmpvRuntimeDir = layout.projectDirectory.dir("src/desktopMain/native/windows/runtime").asFile
+val windowsLibmpvRuntimeDirOverride = providers.gradleProperty("nuvio.windows.libmpv.runtimeDir").orNull
     ?.takeIf { it.isNotBlank() }
     ?.let(::File)
-    ?: listOf(
-        File("C:/Program Files (x86)/Nuvio/app/native"),
-        File("C:/Program Files/Nuvio/app/native"),
-    ).firstOrNull { File(it, "libmpv-2.dll").exists() }
-val windowsLibmpvDll = providers.gradleProperty("nuvio.windows.libmpv.dll").orNull
+val windowsLibmpvRuntimeDir = windowsLibmpvRuntimeDirOverride
+    ?: bundledWindowsLibmpvRuntimeDir.takeIf { File(it, "libmpv-2.dll").exists() }
+val windowsLibmpvDllOverride = providers.gradleProperty("nuvio.windows.libmpv.dll").orNull
     ?.takeIf { it.isNotBlank() }
     ?.let(::File)
+val windowsLibmpvDll = windowsLibmpvDllOverride
     ?: windowsLibmpvRuntimeDir?.resolve("libmpv-2.dll")
     ?: listOf(
         File("C:/msys64/ucrt64/bin/libmpv-2.dll"),
         File("C:/msys64/mingw64/bin/libmpv-2.dll"),
     ).firstOrNull(File::exists)
+val windowsCppRuntimeDllNames = listOf(
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+    "msvcp140.dll",
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "msvcp140_atomic_wait.dll",
+    "msvcp140_codecvt_ids.dll",
+    "concrt140.dll",
+)
+val windowsCppRuntimeDlls = if (isWindowsHost) {
+    windowsCppRuntimeDllNames
+        .map { File("C:/Windows/System32", it) }
+        .filter(File::exists)
+} else {
+    emptyList()
+}
 val windowsVsWhere = File("C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe")
 val windowsVcvarsRelativePath = when (windowsPlayerBridgeArch) {
     "x86" -> "VC\\Auxiliary\\Build\\vcvars32.bat"
@@ -563,6 +824,9 @@ val prepareWindowsPlayerRuntime = tasks.register<Sync>("prepareWindowsPlayerRunt
     if (windowsWebView2LoaderDll.exists()) {
         from(windowsWebView2LoaderDll)
     }
+    windowsCppRuntimeDlls.forEach { dllFile ->
+        from(dllFile)
+    }
     when {
         windowsLibmpvRuntimeDir?.exists() == true -> {
             from(windowsLibmpvRuntimeDir) {
@@ -652,7 +916,16 @@ tasks.withType<KotlinCompilationTask<*>>().configureEach {
 }
 
 kotlin {
-    androidTarget {
+    android {
+        namespace = "com.nuvio.app"
+        compileSdk {
+            version = release(libs.versions.android.compileSdk.get().toInt()) {
+                minorApiLevel = libs.versions.android.compileSdkMinor.get().toInt()
+            }
+        }
+        minSdk = libs.versions.android.minSdk.get().toInt()
+        androidResources.enable = true
+
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_11)
         }
@@ -702,30 +975,42 @@ kotlin {
         val commonMain by getting {
             kotlin.srcDir(generatedRuntimeConfigDir)
         }
-        androidMain.dependencies {
-            implementation(libs.compose.uiToolingPreview)
-            implementation(libs.androidx.appcompat)
-            implementation(libs.androidx.activity.compose)
-            implementation(libs.androidx.core.splashscreen)
-            implementation(libs.androidx.work.runtime)
-            implementation(libs.coil.gif)
-            implementation("androidx.recyclerview:recyclerview:1.4.0")
-            implementation("com.squareup.okhttp3:okhttp:4.12.0")
-            implementation("com.google.code.gson:gson:2.11.0")
-            implementation("io.github.peerless2012:ass-media:0.4.0-beta01")
-            implementation(libs.ktor.client.android)
-            implementation(libs.androidx.media3.exoplayer.hls)
-            implementation(libs.androidx.media3.exoplayer.dash)
-            implementation(libs.androidx.media3.exoplayer.smoothstreaming)
-            implementation(libs.androidx.media3.exoplayer.rtsp)
-            implementation(libs.androidx.media3.datasource)
-            implementation(libs.androidx.media3.datasource.okhttp)
-            implementation(libs.androidx.media3.decoder)
-            implementation(libs.androidx.media3.session)
-            implementation(libs.androidx.media3.common)
-            implementation(libs.androidx.media3.container)
-            implementation(libs.androidx.media3.extractor)
-            implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("lib-*.aar"))))
+        androidMain {
+            kotlin.srcDir(project.file(androidDistributionSourceDir))
+            if (androidDistribution == "full") {
+                kotlin.srcDir(fullCommonSourceDir)
+            }
+
+            dependencies {
+                implementation(libs.compose.uiToolingPreview)
+                implementation(libs.androidx.appcompat)
+                implementation(libs.androidx.activity.compose)
+                implementation(libs.androidx.core.splashscreen)
+                implementation(libs.androidx.work.runtime)
+                implementation(libs.coil.gif)
+                implementation("androidx.recyclerview:recyclerview:1.4.0")
+                implementation("com.squareup.okhttp3:okhttp:4.12.0")
+                implementation("com.google.code.gson:gson:2.11.0")
+                implementation("io.github.peerless2012:ass-media:0.4.0-beta01")
+                implementation(libs.ktor.client.android)
+                implementation(libs.androidx.media3.exoplayer.hls)
+                implementation(libs.androidx.media3.exoplayer.dash)
+                implementation(libs.androidx.media3.exoplayer.smoothstreaming)
+                implementation(libs.androidx.media3.exoplayer.rtsp)
+                implementation(libs.androidx.media3.datasource)
+                implementation(libs.androidx.media3.datasource.okhttp)
+                implementation(libs.androidx.media3.decoder)
+                implementation(libs.androidx.media3.session)
+                implementation(libs.androidx.media3.common)
+                implementation(libs.androidx.media3.container)
+                implementation(libs.androidx.media3.extractor)
+                implementation(libs.mpv.android.lib)
+                implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("lib-*.aar"))))
+                if (androidDistribution == "full") {
+                    implementation(files("libs/quickjs-kt-android-1.0.5-nuvio.aar"))
+                    implementation(libs.ksoup)
+                }
+            }
         }
         val desktopMain by getting {
             kotlin.srcDir(fullPluginSourceDir)
@@ -738,9 +1023,15 @@ kotlin {
             }
         }
         commonMain.dependencies {
-            implementation(libs.coil.compose)
-            implementation(libs.coil.network.ktor3)
-            implementation(libs.coil.svg)
+            implementation("io.coil-kt.coil3:coil-compose:${libs.versions.coil.get()}") {
+                exclude(group = "org.jetbrains.skiko", module = "skiko")
+            }
+            implementation("io.coil-kt.coil3:coil-network-ktor3:${libs.versions.coil.get()}") {
+                exclude(group = "org.jetbrains.skiko", module = "skiko")
+            }
+            implementation("io.coil-kt.coil3:coil-svg:${libs.versions.coil.get()}") {
+                exclude(group = "org.jetbrains.skiko", module = "skiko")
+            }
             implementation("dev.chrisbanes.haze:haze:1.7.2")
             implementation(libs.compose.runtime)
             implementation(libs.compose.foundation)
@@ -752,6 +1043,8 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodelCompose)
             implementation(libs.androidx.lifecycle.runtimeCompose)
             implementation(libs.kotlinx.serialization.json)
+            implementation(libs.kotlinx.atomicfu)
+            implementation(libs.kmpalette.core)
             implementation(libs.androidx.navigation.compose)
             implementation(libs.kermit)
             implementation(libs.supabase.postgrest)
@@ -784,7 +1077,12 @@ compose.desktop {
             packageName = "Nuvio"
             packageVersion = desktopReleasePackageVersion
             vendor = "Nuvio Media"
-            modules("java.net.http")
+            modules(
+                "java.instrument",
+                "java.management",
+                "java.net.http",
+                "jdk.unsupported",
+            )
             macOS {
                 bundleID = "com.nuvio.media.desktop"
                 iconFile.set(project.file("src/desktopMain/resources/icons/nuvio-app-icon.icns"))
@@ -794,16 +1092,21 @@ compose.desktop {
                         identity.set(macosSigningIdentity)
                     }
                 }
-                if (macosNotaryAppleId != null && macosNotaryTeamId != null && macosNotaryPassword != null) {
+                if (
+                    macosNotaryAppleId != null &&
+                    macosNotaryTeamId != null &&
+                    macosNotaryAppSpecificPassword != null
+                ) {
                     notarization {
                         appleID.set(macosNotaryAppleId)
                         teamID.set(macosNotaryTeamId)
-                        password.set(macosNotaryPassword)
+                        password.set(macosNotaryAppSpecificPassword)
                     }
                 }
             }
             windows {
                 iconFile.set(project.file("src/desktopMain/resources/icons/nuvio-app-icon.ico"))
+                upgradeUuid = windowsMsiUpgradeUuid
                 shortcut = true
                 menu = true
                 menuGroup = "Nuvio"
@@ -819,94 +1122,134 @@ compose.desktop {
     }
 }
 
-afterEvaluate {
-    dependencies {
-        add("fullImplementation", files("libs/quickjs-kt-android-1.0.5-nuvio.aar"))
-        add("fullImplementation", libs.ksoup)
+fun renameMacosDmgOutput(release: Boolean) {
+    if (!isMacHost) return
+
+    val distributionName = if (release) "main-release" else "main"
+    val outputDir = layout.buildDirectory.dir("compose/binaries/$distributionName/dmg").get().asFile
+    val finalDmg = outputDir.resolve("Nuvio-macOS-$macosDmgArchName-$desktopReleaseVersionName.dmg")
+    val defaultDmg = outputDir.resolve("Nuvio-$desktopReleasePackageVersion.dmg")
+    val sourceDmg = defaultDmg.takeIf { it.exists() }
+        ?: finalDmg.takeIf { it.exists() }
+        ?: error("Expected macOS DMG output in ${outputDir.absolutePath}")
+
+    if (sourceDmg != finalDmg) {
+        if (finalDmg.exists() && !finalDmg.delete()) {
+            error("Could not replace existing DMG: ${finalDmg.absolutePath}")
+        }
+        if (!sourceDmg.renameTo(finalDmg)) {
+            sourceDmg.copyTo(finalDmg, overwrite = true)
+            if (!sourceDmg.delete()) {
+                logger.warn("Could not delete old DMG after copy: ${sourceDmg.absolutePath}")
+            }
+        }
+    }
+
+    logger.lifecycle("macOS DMG artifact: ${finalDmg.absolutePath}")
+    publishMacosDmgArtifact(finalDmg)
+}
+
+fun publishMacosDmgArtifact(dmg: File) {
+    val publishedDir = layout.buildDirectory.dir("compose/release-dmgs").get().asFile
+    publishedDir.mkdirs()
+    val publishedDmg = publishedDir.resolve(dmg.name)
+    if (dmg.canonicalFile != publishedDmg.canonicalFile) {
+        dmg.copyTo(publishedDmg, overwrite = true)
+    }
+    logger.lifecycle("Published macOS DMG artifact: ${publishedDmg.absolutePath}")
+}
+
+fun publishWindowsMsiOutput(release: Boolean) {
+    if (!isWindowsHost) return
+
+    val distributionName = if (release) "main-release" else "main"
+    val outputDir = layout.buildDirectory.dir("compose/binaries/$distributionName/msi").get().asFile
+    val finalMsi = outputDir.resolve("Nuvio-Windows-$windowsPlayerBridgeArch-$desktopReleaseVersionName.msi")
+    val defaultMsi = outputDir.resolve("Nuvio-$desktopReleasePackageVersion.msi")
+    val sourceMsi = defaultMsi.takeIf { it.exists() }
+        ?: finalMsi.takeIf { it.exists() }
+        ?: error("Expected Windows MSI output in ${outputDir.absolutePath}")
+
+    if (sourceMsi.canonicalFile != finalMsi.canonicalFile) {
+        sourceMsi.copyTo(finalMsi, overwrite = true)
+    }
+
+    logger.lifecycle("Windows MSI artifact: ${finalMsi.absolutePath}")
+    publishWindowsMsiArtifact(finalMsi)
+}
+
+fun publishWindowsMsiArtifact(msi: File) {
+    val publishedDir = layout.buildDirectory.dir("compose/release-msis").get().asFile
+    publishedDir.mkdirs()
+    val publishedMsi = publishedDir.resolve(msi.name)
+    if (msi.canonicalFile != publishedMsi.canonicalFile) {
+        msi.copyTo(publishedMsi, overwrite = true)
+    }
+    logger.lifecycle("Published Windows MSI artifact: ${publishedMsi.absolutePath}")
+}
+
+tasks.matching { it.name == "packageDmg" }.configureEach {
+    doLast {
+        if (!isMacosDmgNotarizationRequested) {
+            renameMacosDmgOutput(release = false)
+        }
     }
 }
 
-configurations.matching { it.name == "iosMainImplementation" }.configureEach {
-    project.dependencies.add(name, libs.ktor.client.darwin)
+tasks.matching { it.name == "packageReleaseDmg" }.configureEach {
+    doLast {
+        if (!isMacosDmgNotarizationRequested) {
+            renameMacosDmgOutput(release = true)
+        }
+    }
 }
 
-dependencies {
-    coreLibraryDesugaring(libs.desugar.jdk.libs)
-    debugImplementation(libs.compose.uiTooling)
+tasks.matching { it.name == "notarizeDmg" }.configureEach {
+    notCompatibleWithConfigurationCache("Compose Desktop notarization settings are not configuration-cache safe.")
+    doLast {
+        renameMacosDmgOutput(release = false)
+    }
+}
+
+tasks.matching { it.name == "notarizeReleaseDmg" }.configureEach {
+    notCompatibleWithConfigurationCache("Compose Desktop notarization settings are not configuration-cache safe.")
+    doLast {
+        renameMacosDmgOutput(release = true)
+    }
+}
+
+tasks.matching { it.name == "packageMsi" }.configureEach {
+    notCompatibleWithConfigurationCache("Windows MSI artifact publication uses script file operations.")
+    doLast {
+        publishWindowsMsiOutput(release = false)
+    }
+}
+
+tasks.matching { it.name == "packageReleaseMsi" }.configureEach {
+    notCompatibleWithConfigurationCache("Windows MSI artifact publication uses script file operations.")
+    doLast {
+        publishWindowsMsiOutput(release = true)
+    }
+}
+
+if (isMacHost) {
+    tasks.register<NotarizeMacosDmgWithKeychainTask>("notarizeReleaseDmgWithKeychain") {
+        group = "distribution"
+        description = "Packages, notarizes, and staples the release macOS DMG using a notarytool keychain profile."
+        dependsOn("packageReleaseDmg")
+        dmgDir.set(layout.buildDirectory.dir("compose/binaries/main-release/dmg"))
+        artifactDir.set(layout.buildDirectory.dir("compose/release-dmgs"))
+        finalDmgName.set("Nuvio-macOS-$macosDmgArchName-$desktopReleaseVersionName.dmg")
+        defaultDmgName.set("Nuvio-$desktopReleasePackageVersion.dmg")
+        keychainProfile.set(macosNotaryKeychainProfile.orEmpty())
+        signingIdentity.set(macosSigningIdentity.orEmpty())
+    }
+}
+configurations.matching { it.name == "iosMainImplementation" }.configureEach {
+    project.dependencies.add(name, libs.ktor.client.darwin)
 }
 
 configurations.all {
     exclude(group = "androidx.media3", module = "media3-exoplayer")
     exclude(group = "androidx.media3", module = "media3-ui")
-}
-
-android {
-    namespace = "com.nuvio.app"
-    compileSdk = libs.versions.android.compileSdk.get().toInt()
-
-    signingConfigs {
-        create("release") {
-            if (releaseKeystore != null && releaseStorePassword != null && releaseKeyAlias != null && releaseKeyPassword != null) {
-                storeFile = releaseKeystore
-                storePassword = releaseStorePassword
-                keyAlias = releaseKeyAlias
-                keyPassword = releaseKeyPassword
-            }
-        }
-    }
-
-    defaultConfig {
-        applicationId = "com.nuvio.app"
-        minSdk = libs.versions.android.minSdk.get().toInt()
-        targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = releaseAppVersionCode
-        versionName = releaseAppVersionName
-    }
-    flavorDimensions += "distribution"
-    productFlavors {
-        create("full") {
-            dimension = "distribution"
-        }
-        create("playstore") {
-            dimension = "distribution"
-        }
-    }
-    sourceSets.getByName("full") {
-        manifest.srcFile("src/androidFull/AndroidManifest.xml")
-        java.srcDir(fullCommonSourceDir)
-    }
-    packaging {
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        }
-        jniLibs {
-            useLegacyPackaging = true
-            pickFirsts += listOf(
-                "lib/*/libc++_shared.so",
-                "lib/*/libavcodec.so",
-                "lib/*/libavutil.so",
-                "lib/*/libswscale.so",
-                "lib/*/libswresample.so"
-            )
-        }
-    }
-    buildTypes {
-        getByName("release") {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro",
-            )
-            signingConfig = signingConfigs.getByName("release")
-            ndk {
-                debugSymbolLevel = "FULL"
-            }
-        }
-    }
-    compileOptions {
-        isCoreLibraryDesugaringEnabled = true
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
-    }
 }

@@ -2,6 +2,10 @@ const root = document.getElementById("playerRoot");
 const seek = document.getElementById("seek");
 const positionLabel = document.getElementById("position");
 const durationLabel = document.getElementById("duration");
+const timeLabel = document.getElementById("timeLabel");
+const volumeControl = document.getElementById("volumeControl");
+const volumeIcon = document.getElementById("volumeIcon");
+const volumeSlider = document.getElementById("volumeSlider");
 const bufferingStatus = document.getElementById("bufferingStatus");
 const playbackError = document.getElementById("playbackError");
 const playbackErrorTitle = document.getElementById("playbackErrorTitle");
@@ -17,7 +21,10 @@ const pauseEpisodeTitle = document.getElementById("pauseEpisodeTitle");
 const pauseDescription = document.getElementById("pauseDescription");
 const toggle = document.getElementById("toggle");
 const toggleIcon = document.getElementById("toggleIcon");
+const toggleLabel = document.getElementById("toggleLabel");
 const lockIcon = document.getElementById("lockIcon");
+const fullscreenButton = document.getElementById("fullscreenButton");
+const fullscreenIcon = document.getElementById("fullscreenIcon");
 const title = document.getElementById("title");
 const episode = document.getElementById("episode");
 const streamTitle = document.getElementById("streamTitle");
@@ -35,6 +42,8 @@ const backButton = document.getElementById("backButton");
 const openingOverlay = document.getElementById("openingOverlay");
 const openingArtwork = document.getElementById("openingArtwork");
 const openingBackButton = document.getElementById("openingBackButton");
+const openingFullscreenButton = document.getElementById("openingFullscreenButton");
+const openingFullscreenIcon = document.getElementById("openingFullscreenIcon");
 const openingLogoSlot = document.getElementById("openingLogoSlot");
 const openingLogoBase = document.getElementById("openingLogoBase");
 const openingLogoFillClip = document.getElementById("openingLogoFillClip");
@@ -142,6 +151,8 @@ const p2pConsentCloseButton = document.getElementById("p2pConsentCloseButton");
 const p2pConsentBody = document.getElementById("p2pConsentBody");
 const p2pConsentCancelButton = document.getElementById("p2pConsentCancelButton");
 const p2pConsentEnableButton = document.getElementById("p2pConsentEnableButton");
+const playerToast = document.getElementById("playerToast");
+const playerToastText = document.getElementById("playerToastText");
 
 let state = {
   title: "",
@@ -155,6 +166,8 @@ let state = {
   pauseOverlayDescription: "",
   resizeModeLabel: "Fit",
   playbackSpeedLabel: "1x",
+  isFullscreen: false,
+  volumeLevel: null,
   subtitlesLabel: "Subs",
   audioLabel: "Audio",
   sourcesLabel: "Sources",
@@ -307,6 +320,7 @@ let scrubPositionMs = 0;
 let tapTimer = 0;
 let activeModal = "";
 let pressedButton = null;
+let focusedActionCommand = "";
 let sourceFilterId = "";
 let sourceVirtualKey = "";
 let sourceVirtualItems = [];
@@ -342,12 +356,23 @@ let chromeInteractionLastNotedAt = 0;
 let isChromePointerInside = false;
 let isChromePointerDown = false;
 let isChromeFocusInside = false;
+let hiddenCursorTimer = 0;
+let hiddenCursorTemporarilyVisible = false;
+let cursorActivityLastSentAt = 0;
 let nativeViewportTimer = 0;
+let playerToastTimer = 0;
+let playerToastToken = 0;
+let pendingSettingToastCommand = "";
+let pendingSettingToastToken = 0;
+let pendingVolumeToast = false;
 const prefersReducedMotion = window.matchMedia &&
   window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const modalTransitionMs = prefersReducedMotion ? 1 : 240;
 const chromeAutoHideDelayMs = 3500;
 const chromeActivityThrottleMs = 300;
+const hiddenCursorHideDelayMs = 3000;
+const cursorActivityThrottleMs = 100;
+const playerToastDurationMs = 1400;
 const chromeInteractionSelector = [
   "button",
   "input",
@@ -371,6 +396,104 @@ const send = (type, value = 0) => {
   }
   const webViewBridge = window.chrome && window.chrome.webview;
   if (webViewBridge) webViewBridge.postMessage({ type, value });
+};
+
+const syncFullscreenButtons = () => {
+  const isFullscreen = Boolean(state.isFullscreen);
+  const icon = isFullscreen ? "#icon-fullscreen-exit" : "#icon-fullscreen";
+  const label = isFullscreen ? "Exit fullscreen" : "Enter fullscreen";
+  if (fullscreenIcon) fullscreenIcon.setAttribute("href", icon);
+  if (openingFullscreenIcon) openingFullscreenIcon.setAttribute("href", icon);
+  if (fullscreenButton) fullscreenButton.setAttribute("aria-label", label);
+  if (openingFullscreenButton) openingFullscreenButton.setAttribute("aria-label", label);
+};
+
+const togglePlayerFullscreen = () => {
+  send("toggleFullscreen", 0);
+};
+
+const hidePlayerToast = token => {
+  if (!playerToast || (token != null && token !== playerToastToken)) return;
+  playerToast.classList.remove("visible");
+  playerToast.setAttribute("aria-hidden", "true");
+};
+
+const showPlayerToast = (message, { durationMs = playerToastDurationMs } = {}) => {
+  const cleanMessage = String(message || "").trim();
+  if (!playerToast || !playerToastText || !cleanMessage) return;
+  window.clearTimeout(playerToastTimer);
+  playerToastToken += 1;
+  const token = playerToastToken;
+  playerToastText.textContent = cleanMessage;
+  playerToast.setAttribute("aria-hidden", "false");
+  playerToast.classList.add("visible");
+  playerToastTimer = window.setTimeout(() => hidePlayerToast(token), durationMs);
+};
+
+const settingToastLabel = command => {
+  if (command === "resize") return state.resizeModeLabel || "Fit";
+  if (command === "speed") return state.playbackSpeedLabel || "1x";
+  return "";
+};
+
+const volumeToastLabel = (fallbackDelta = 0) => {
+  const volumeLevel = state.volumeLevel;
+  if (typeof volumeLevel === "number" && Number.isFinite(volumeLevel)) {
+    return `Volume ${Math.round(Math.max(0, Math.min(1, volumeLevel)) * 100)}%`;
+  }
+  return fallbackDelta < 0 ? "Volume down" : "Volume up";
+};
+
+const syncVolumeControl = () => {
+  if (!volumeControl || !volumeSlider || !volumeIcon) return;
+  const volumeLevel = state.volumeLevel;
+  const hasLevel = typeof volumeLevel === "number" && Number.isFinite(volumeLevel);
+  const clampedLevel = hasLevel ? Math.max(0, Math.min(1, volumeLevel)) : 1;
+  const percent = Math.round(clampedLevel * 100);
+  const label = `Volume ${percent}%`;
+  volumeControl.style.setProperty("--volume", `${percent}%`);
+  volumeSlider.value = String(percent);
+  volumeSlider.setAttribute("aria-label", label);
+  volumeSlider.setAttribute("title", label);
+  volumeIcon.setAttribute("href", percent === 0 ? "#icon-volume-muted" : "#icon-volume");
+};
+
+const nextVolumeToastLabel = delta => {
+  const volumeLevel = state.volumeLevel;
+  if (typeof volumeLevel === "number" && Number.isFinite(volumeLevel)) {
+    const nextLevel = Math.max(0, Math.min(1, volumeLevel + (delta * 0.05)));
+    return `Volume ${Math.round(nextLevel * 100)}%`;
+  }
+  return volumeToastLabel(delta);
+};
+
+const seekToastLabel = command => {
+  if (command === "seekBack" || command === "keyboardSeekBack") return "-10s";
+  if (command === "seekForward" || command === "keyboardSeekForward") return "+10s";
+  return "";
+};
+
+const showCommandToast = command => {
+  queueSettingToast(command);
+  const seekLabel = seekToastLabel(command);
+  if (seekLabel) {
+    showPlayerToast(seekLabel);
+  }
+};
+
+const queueSettingToast = command => {
+  if (command !== "resize" && command !== "speed") return;
+  pendingSettingToastCommand = command;
+  pendingSettingToastToken += 1;
+  const token = pendingSettingToastToken;
+  window.setTimeout(() => {
+    if (pendingSettingToastCommand !== command || pendingSettingToastToken !== token) return;
+    showPlayerToast(settingToastLabel(command));
+  }, 900);
+  window.setTimeout(() => {
+    if (pendingSettingToastCommand !== command || pendingSettingToastToken !== token) return;
+    pendingSettingToastCommand = "";
+  }, 2500);
 };
 
 const animationDelay = ms => new Promise(resolve => {
@@ -540,6 +663,10 @@ const setProgress = (positionMs, durationMs) => {
   seek.style.setProperty("--progress", `${percent}%`);
   positionLabel.textContent = formatTime(positionMs);
   durationLabel.textContent = formatTime(durationMs);
+  if (timeLabel) {
+    timeLabel.textContent = `${formatTime(positionMs)} / ${formatTime(durationMs)}`;
+  }
+  syncVolumeControl();
 };
 
 const setText = (element, text) => {
@@ -549,6 +676,15 @@ const setText = (element, text) => {
 
 const setVisible = (element, visible) => {
   element.hidden = !visible;
+};
+
+const setActionButtonLabel = (command, label) => {
+  const button = document.querySelector(`.action[data-command="${command}"]`);
+  if (!button) return;
+  const text = String(label || "").trim();
+  if (!text) return;
+  button.setAttribute("aria-label", text);
+  button.setAttribute("title", text);
 };
 
 const setImageVisualState = (element, stateName) => {
@@ -1344,10 +1480,12 @@ const renderEpisodeStreams = () => {
     );
     return;
   }
-  items.forEach(item => appendSourceRow(episodeStreamList, item, selected => {
-    send("selectEpisodeStream", Number(selected.index) || 0);
-    window.setTimeout(closePlayerModal, 120);
-  }));
+  items.forEach(item => {
+    episodeStreamList.appendChild(buildSourceRow(item, selected => {
+      send("selectEpisodeStream", Number(selected.index) || 0);
+      window.setTimeout(closePlayerModal, 120);
+    }));
+  });
 };
 
 const renderEpisodesModal = () => {
@@ -1449,6 +1587,7 @@ const renderOpeningOverlay = suppress => {
   openingOverlay.classList.toggle("has-progress", hasProgress);
   openingOverlay.setAttribute("aria-hidden", showOpening ? "false" : "true");
   openingBackButton.setAttribute("aria-label", state.closeLabel || "Close player");
+  syncFullscreenButtons();
 
   openingLogoSlot.hidden = !logoUrl;
   openingLogoFillClip.style.width = `${(progress || 0) * 100}%`;
@@ -1597,6 +1736,49 @@ const clearChromeAutoHideTimer = () => {
   chromeAutoHideKey = "";
 };
 
+const shouldHideCursorForIdleChrome = () => Boolean(
+  !playbackErrorText() &&
+  !state.controlsVisible &&
+  !(state.isLocked && state.lockedOverlayVisible),
+);
+
+const clearHiddenCursorTimer = () => {
+  window.clearTimeout(hiddenCursorTimer);
+  hiddenCursorTimer = 0;
+};
+
+const syncHiddenCursor = () => {
+  if (!shouldHideCursorForIdleChrome()) {
+    clearHiddenCursorTimer();
+    hiddenCursorTemporarilyVisible = false;
+    root.classList.remove("cursor-hidden");
+    return;
+  }
+  root.classList.toggle("cursor-hidden", !hiddenCursorTemporarilyVisible);
+};
+
+const noteCursorActivity = () => {
+  if (!shouldHideCursorForIdleChrome()) {
+    syncHiddenCursor();
+    return;
+  }
+
+  const now = window.performance ? window.performance.now() : Date.now();
+  hiddenCursorTemporarilyVisible = true;
+  syncHiddenCursor();
+  clearHiddenCursorTimer();
+  hiddenCursorTimer = window.setTimeout(() => {
+    hiddenCursorTimer = 0;
+    hiddenCursorTemporarilyVisible = false;
+    syncHiddenCursor();
+  }, hiddenCursorHideDelayMs);
+
+  if (now - cursorActivityLastSentAt >= cursorActivityThrottleMs) {
+    cursorActivityLastSentAt = now;
+    send("cursorActivity", 0);
+  }
+};
+
 const hideChromeFromAutoTimer = () => {
   if (!canAutoHideChrome(isOpeningOverlayActive())) return;
   state = { ...state, controlsVisible: false };
@@ -1632,6 +1814,7 @@ const noteChromeActivity = (force = false) => {
   chromeInteractionLastNotedAt = now;
   chromeAutoHideActivity += 1;
   syncChromeAutoHideTimer(isOpeningOverlayActive());
+  send("keepChromeVisible", 0);
 };
 
 const updateChromePointerInside = inside => {
@@ -1660,6 +1843,7 @@ const renderChrome = () => {
   root.classList.toggle("locked-visible", Boolean(state.isLocked && state.lockedOverlayVisible));
   root.classList.toggle("chrome-hidden", Boolean(showError || (!state.controlsVisible && !(state.isLocked && state.lockedOverlayVisible))));
   root.classList.toggle("source-visible", Boolean(!showError && !isPlaying && !state.isLoading && (state.streamTitle || state.providerName)));
+  syncHiddenCursor();
   const showOpening = renderOpeningOverlay(showError);
   renderPauseMetadataOverlay(showOpening || showError);
   syncParentalGuide(showOpening || showError);
@@ -1674,6 +1858,12 @@ const renderChrome = () => {
   audioLabel.textContent = state.audioLabel || "Audio";
   sourcesLabel.textContent = state.sourcesLabel || "Sources";
   episodesLabel.textContent = state.episodesLabel || "Episodes";
+  setActionButtonLabel("resize", state.resizeModeLabel || "Fit");
+  setActionButtonLabel("speed", state.playbackSpeedLabel || "1x");
+  setActionButtonLabel("subtitles", state.subtitlesLabel || "Subs");
+  setActionButtonLabel("audio", state.audioLabel || "Audio");
+  setActionButtonLabel("sources", state.sourcesLabel || "Sources");
+  setActionButtonLabel("episodes", state.episodesLabel || "Episodes");
   lockedLabel.textContent = state.tapToUnlockLabel || "Tap to unlock";
   const showBuffering = Boolean(!showError && state.isLoading && !state.isLocked && !activeModal && !showOpening);
   bufferingStatus.classList.toggle("visible", showBuffering);
@@ -1683,6 +1873,7 @@ const renderChrome = () => {
   setVisible(videoSettingsButton, Boolean(state.showVideoSettings));
   setVisible(sourcesButton, Boolean(state.showSources));
   setVisible(episodesButton, Boolean(state.showEpisodes));
+  syncActionFocusState();
 
   const playPauseLabel = isPlaying ? state.pauseLabel : state.playLabel;
   if (toggle) {
@@ -1691,8 +1882,12 @@ const renderChrome = () => {
   if (toggleIcon) {
     toggleIcon.setAttribute("href", isPlaying ? "#icon-pause" : "#icon-play");
   }
+  if (toggleLabel) {
+    toggleLabel.textContent = playPauseLabel || (isPlaying ? "Pause" : "Play");
+  }
   lockButton.setAttribute("aria-label", state.isLocked ? state.unlockLabel : state.lockLabel);
   lockIcon.setAttribute("href", state.isLocked ? "#icon-lock-open" : "#icon-lock");
+  syncFullscreenButtons();
   backButton.setAttribute("aria-label", state.closeLabel || "Close player");
   submitIntroButton.setAttribute("aria-label", state.submitIntroLabel || "Submit Intro");
   videoSettingsButton.setAttribute("aria-label", state.videoSettingsLabel || "Video settings");
@@ -1723,7 +1918,7 @@ const focusShortcutRoot = () => {
 
 const isTextEntryTarget = target => {
   const element = target && target.closest && target.closest("input, textarea, select, [contenteditable='true']");
-  return Boolean(element);
+  return Boolean(element && element.type !== "range");
 };
 
 const shortcutCommandForEvent = event => {
@@ -1738,9 +1933,139 @@ const shortcutCommandForEvent = event => {
     case "ArrowRight":
     case "KeyL":
       return "keyboardSeekForward";
+    case "ArrowUp":
+      return "keyboardVolumeUp";
+    case "ArrowDown":
+      return "keyboardVolumeDown";
     default:
       return "";
   }
+};
+
+const visibleActionButtons = () =>
+  Array.from(document.querySelectorAll(".action-pill .action"))
+    .filter(button => !button.hidden && !button.disabled && window.getComputedStyle(button).display !== "none");
+
+const setFocusedActionButton = (button, { focus = true } = {}) => {
+  if (!button || button.hidden || button.disabled) return false;
+  visibleActionButtons().forEach(control => {
+    if (control !== button) control.classList.remove("focused");
+  });
+  focusedActionCommand = button.dataset.command || "";
+  button.classList.add("focused");
+  if (focus) {
+    button.focus({ preventScroll: true });
+  }
+  return true;
+};
+
+const ensureActionFocus = ({ focus = true } = {}) => {
+  const controls = visibleActionButtons();
+  if (!controls.length) {
+    focusedActionCommand = "";
+    return false;
+  }
+  const current = controls.find(button => button.classList.contains("focused"));
+  const preferred = current ||
+    controls.find(button => button.dataset.command === focusedActionCommand) ||
+    controls[0];
+  return setFocusedActionButton(preferred, { focus });
+};
+
+const syncActionFocusState = () => {
+  const controls = visibleActionButtons();
+  const visibleSet = new Set(controls);
+  document.querySelectorAll(".action-pill .action.focused").forEach(button => {
+    if (!visibleSet.has(button)) button.classList.remove("focused");
+  });
+  if (controls.some(button => button.classList.contains("focused"))) return;
+  if (!focusedActionCommand) return;
+  const preferred = controls.find(button => button.dataset.command === focusedActionCommand);
+  if (preferred) {
+    setFocusedActionButton(preferred, { focus: false });
+  }
+};
+
+const moveActionFocus = delta => {
+  const controls = visibleActionButtons();
+  if (!controls.length) return false;
+  const current = controls.find(button => button.classList.contains("focused"));
+  const currentIndex = Math.max(0, current ? controls.indexOf(current) : 0);
+  const nextIndex = Math.max(0, Math.min(controls.length - 1, currentIndex + delta));
+  return setFocusedActionButton(controls[nextIndex], { focus: true });
+};
+
+const performActionCommand = command => {
+  if (!command) return false;
+  const button = visibleActionButtons().find(control => control.dataset.command === command);
+  if (!button) return false;
+  setFocusedActionButton(button, { focus: true });
+  button.click();
+  return true;
+};
+
+const actionShortcutCommandForEvent = event => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return "";
+  switch (event.code) {
+    case "KeyS":
+      return "subtitles";
+    case "KeyT":
+      return "audio";
+    case "KeyC":
+      return "sources";
+    case "KeyE":
+      return "episodes";
+    case "KeyP":
+      return "keyboardToggle";
+    default:
+      return "";
+  }
+};
+
+const keepChromeVisibleFromKeyboard = () => {
+  noteChromeActivity(true);
+};
+
+const sendKeyboardVolume = delta => {
+  pendingVolumeToast = true;
+  showPlayerToast(nextVolumeToastLabel(delta));
+  send(delta < 0 ? "keyboardVolumeDown" : "keyboardVolumeUp", 0);
+};
+
+const setChromeVisibleFromKeyboard = (visible, { focusAction = false } = {}) => {
+  if (playbackErrorText()) return false;
+  if (state.isLocked) {
+    send("revealLockedOverlay", 0);
+    return true;
+  }
+  const nextVisible = Boolean(visible);
+  if (state.controlsVisible !== nextVisible) {
+    state = { ...state, controlsVisible: nextVisible };
+    renderChrome();
+    send(nextVisible ? "toggleChrome" : "hideChrome", 0);
+  }
+  if (nextVisible) {
+    keepChromeVisibleFromKeyboard();
+    if (focusAction) {
+      ensureActionFocus({ focus: true });
+    }
+  } else {
+    clearChromeAutoHideTimer();
+    focusShortcutRoot();
+  }
+  return true;
+};
+
+const handleTvStyleControlKey = event => {
+  if (event.metaKey || event.ctrlKey || event.altKey || activeModal || isTextEntryTarget(event.target)) return false;
+  if (state.isLocked) {
+    const controlKey = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "NumpadEnter", "Space"].includes(event.code);
+    if (!controlKey) return false;
+    event.preventDefault();
+    send("revealLockedOverlay", 0);
+    return true;
+  }
+  return false;
 };
 
 const toggleChrome = () => {
@@ -1787,6 +2112,7 @@ document.addEventListener("pointerdown", event => {
 }, true);
 
 document.addEventListener("pointermove", event => {
+  noteCursorActivity();
   const inside = isChromeInteractionTarget(event.target);
   updateChromePointerInside(inside);
   if (inside) {
@@ -1802,6 +2128,10 @@ document.addEventListener("pointerleave", () => {
 }, true);
 document.addEventListener("focusin", event => {
   isChromeFocusInside = isChromeInteractionTarget(event.target);
+  const actionButton = event.target.closest && event.target.closest(".action-pill .action");
+  if (actionButton) {
+    setFocusedActionButton(actionButton, { focus: false });
+  }
   if (isChromeFocusInside) {
     noteChromeActivity(true);
   }
@@ -1823,6 +2153,9 @@ window.addEventListener("blur", () => {
 document.querySelectorAll("[data-command]").forEach(button => {
   button.addEventListener("click", event => {
     event.stopPropagation();
+    if (button.closest(".action-pill")) {
+      setFocusedActionButton(button, { focus: false });
+    }
     noteChromeActivity(true);
     const command = button.dataset.command;
     if (command === "audio") {
@@ -1849,6 +2182,11 @@ document.querySelectorAll("[data-command]").forEach(button => {
       openPlayerModal("submitIntro");
       return;
     }
+    if (command === "toggleFullscreen") {
+      togglePlayerFullscreen();
+      return;
+    }
+    showCommandToast(command);
     send(command, 0);
   });
 });
@@ -2096,6 +2434,15 @@ seek.addEventListener("change", () => {
   render();
 });
 
+volumeSlider.addEventListener("input", () => {
+  noteChromeActivity();
+  const percent = Math.max(0, Math.min(100, Number(volumeSlider.value) || 0));
+  const nextLevel = percent / 100;
+  state.volumeLevel = nextLevel;
+  syncVolumeControl();
+  send("volumeChange", nextLevel);
+});
+
 window.playerUpdate = update => {
   const durationMs = Math.round((Number(update.duration) || 0) * 1000);
   const positionMs = Math.round((Number(update.position) || 0) * 1000);
@@ -2121,6 +2468,9 @@ window.playerUpdate = update => {
 
 window.playerControls = nextState => {
   const previousCloseToken = Number(state.closeModalsToken) || 0;
+  const previousResizeLabel = state.resizeModeLabel || "";
+  const previousSpeedLabel = state.playbackSpeedLabel || "";
+  const previousVolumeLevel = typeof state.volumeLevel === "number" ? state.volumeLevel : NaN;
   state = { ...state, ...nextState };
   hasReceivedPlayerControls = true;
   const closeToken = Number(state.closeModalsToken) || 0;
@@ -2133,6 +2483,22 @@ window.playerControls = nextState => {
     closePlayerModal();
   }
   render();
+  if (pendingSettingToastCommand === "resize" && (state.resizeModeLabel || "") !== previousResizeLabel) {
+    pendingSettingToastCommand = "";
+    showPlayerToast(settingToastLabel("resize"));
+  } else if (pendingSettingToastCommand === "speed" && (state.playbackSpeedLabel || "") !== previousSpeedLabel) {
+    pendingSettingToastCommand = "";
+    showPlayerToast(settingToastLabel("speed"));
+  }
+  const nextVolumeLevel = typeof state.volumeLevel === "number" ? state.volumeLevel : NaN;
+  if (
+    pendingVolumeToast &&
+    Number.isFinite(nextVolumeLevel) &&
+    (!Number.isFinite(previousVolumeLevel) || Math.abs(nextVolumeLevel - previousVolumeLevel) > 0.001)
+  ) {
+    pendingVolumeToast = false;
+    showPlayerToast(volumeToastLabel());
+  }
 };
 
 root.addEventListener("click", event => {
@@ -2149,7 +2515,7 @@ root.addEventListener("dblclick", event => {
   if (event.target.closest("button,input")) return;
   event.preventDefault();
   window.clearTimeout(tapTimer);
-  send("toggleFullscreen", 0);
+  togglePlayerFullscreen();
 });
 
 document.addEventListener("keydown", event => {
@@ -2174,10 +2540,13 @@ document.addEventListener("keydown", event => {
   if (event.code === "F11" || isMacFullscreenShortcut) {
     event.preventDefault();
     focusShortcutRoot();
-    send("toggleFullscreen", 0);
+    togglePlayerFullscreen();
     return;
   }
   if (activeModal || isTextEntryTarget(event.target)) {
+    return;
+  }
+  if (handleTvStyleControlKey(event)) {
     return;
   }
   const command = shortcutCommandForEvent(event);
@@ -2187,6 +2556,15 @@ document.addEventListener("keydown", event => {
   event.preventDefault();
   focusShortcutRoot();
   noteChromeActivity();
+  if (command === "keyboardVolumeUp") {
+    sendKeyboardVolume(1);
+    return;
+  }
+  if (command === "keyboardVolumeDown") {
+    sendKeyboardVolume(-1);
+    return;
+  }
+  showCommandToast(command);
   send(command, 0);
 });
 

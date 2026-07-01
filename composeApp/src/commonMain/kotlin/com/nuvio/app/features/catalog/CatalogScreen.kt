@@ -82,6 +82,7 @@ fun CatalogScreen(
         WatchedRepository.ensureLoaded()
         WatchedRepository.uiState
     }.collectAsStateWithLifecycle()
+    val fullyWatchedSeriesKeys by WatchedRepository.fullyWatchedSeriesKeys.collectAsStateWithLifecycle()
     val initialScrollPosition = remember(
         target,
         homeCatalogSettingsUiState.hideUnreleasedContent,
@@ -203,6 +204,7 @@ fun CatalogScreen(
                             isWatched = WatchingState.isPosterWatched(
                                 watchedKeys = watchedUiState.watchedKeys,
                                 item = item,
+                                fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
                             ),
                             onClick = onPosterClick?.let { { it(item) } },
                             onLongClick = onPosterLongClick?.let { { it(item) } },
@@ -280,6 +282,7 @@ private fun CatalogPosterTile(
     onLongClick: (() -> Unit)? = null,
 ) {
     Column(
+        modifier = Modifier.posterCardClickable(onClick = onClick, onLongClick = onLongClick),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Box(
@@ -287,8 +290,7 @@ private fun CatalogPosterTile(
                 .fillMaxWidth()
                 .aspectRatio(item.posterShape.catalogAspectRatio())
                 .clip(RoundedCornerShape(cornerRadiusDp.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .posterCardClickable(onClick = onClick, onLongClick = onLongClick),
+                .background(MaterialTheme.colorScheme.surface),
         ) {
             if (item.poster != null) {
                 AsyncImage(

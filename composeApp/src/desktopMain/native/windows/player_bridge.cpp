@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 using Microsoft::WRL::Callback;
@@ -66,6 +67,15 @@ constexpr DWORD kDwmwaUseImmersiveDarkModeLegacy = 19;
 constexpr DWORD kDwmwaBorderColor = 34;
 constexpr DWORD kDwmwaCaptionColor = 35;
 constexpr DWORD kDwmwaTextColor = 36;
+
+struct BorderlessFullscreenState {
+    LONG_PTR style = 0;
+    LONG_PTR exStyle = 0;
+    WINDOWPLACEMENT placement = {};
+};
+
+std::mutex gBorderlessFullscreenMutex;
+std::unordered_map<HWND, BorderlessFullscreenState> gBorderlessFullscreenStates;
 
 std::wstring toWide(const std::string &value) {
     if (value.empty()) return std::wstring();
@@ -149,6 +159,33 @@ void setDwmWindowAttribute(HWND hwnd, DWORD attribute, const void *value, DWORD 
     (void)DwmSetWindowAttribute(hwnd, attribute, value, valueSize);
 }
 
+bool getMonitorRect(HWND hwnd, bool workArea, RECT &rect) {
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if (!monitor) return false;
+
+    MONITORINFO monitorInfo = {};
+    monitorInfo.cbSize = sizeof(MONITORINFO);
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) return false;
+
+    rect = workArea ? monitorInfo.rcWork : monitorInfo.rcMonitor;
+    const LONG width = rect.right - rect.left;
+    const LONG height = rect.bottom - rect.top;
+    if (width <= 0 || height <= 0) return false;
+
+    return true;
+}
+
+RECT resolveBorderlessFullscreenRect(HWND hwnd, int x, int y, int width, int height) {
+    RECT rect = {};
+    if (getMonitorRect(hwnd, false, rect)) return rect;
+
+    rect.left = x;
+    rect.top = y;
+    rect.right = x + std::max(1, width);
+    rect.bottom = y + std::max(1, height);
+    return rect;
+}
+
 void applyDwmWindowChrome(HWND hwnd, bool darkMode, COLORREF captionColor, COLORREF borderColor, COLORREF textColor) {
     if (!hwnd || !IsWindow(hwnd)) return;
 
@@ -166,6 +203,84 @@ void applyDwmWindowChrome(HWND hwnd, bool darkMode, COLORREF captionColor, COLOR
     setDwmWindowAttribute(hwnd, kDwmwaCaptionColor, &captionColor, sizeof(captionColor));
     setDwmWindowAttribute(hwnd, kDwmwaBorderColor, &borderColor, sizeof(borderColor));
     setDwmWindowAttribute(hwnd, kDwmwaTextColor, &textColor, sizeof(textColor));
+}
+
+void setBorderlessFullscreen(HWND hwnd, bool fullscreen, int x, int y, int width, int height) {
+    if (!hwnd || !IsWindow(hwnd)) return;
+
+    if (fullscreen) {
+        {
+            std::lock_guard<std::mutex> lock(gBorderlessFullscreenMutex);
+            if (gBorderlessFullscreenStates.find(hwnd) == gBorderlessFullscreenStates.end()) {
+                BorderlessFullscreenState state;
+                state.style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+                state.exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                state.placement.length = sizeof(WINDOWPLACEMENT);
+                GetWindowPlacement(hwnd, &state.placement);
+                gBorderlessFullscreenStates.emplace(hwnd, state);
+            }
+        }
+
+        RECT fullscreenRect = resolveBorderlessFullscreenRect(hwnd, x, y, width, height);
+        if (IsIconic(hwnd) || IsZoomed(hwnd)) {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+
+        LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        style &= ~(LONG_PTR)(WS_CAPTION | WS_THICKFRAME);
+        exStyle &= ~(LONG_PTR)(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
+
+        SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            fullscreenRect.left,
+            fullscreenRect.top,
+            fullscreenRect.right - fullscreenRect.left,
+            fullscreenRect.bottom - fullscreenRect.top,
+            SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOACTIVATE
+        );
+        return;
+    }
+
+    BorderlessFullscreenState state;
+    bool hasState = false;
+    {
+        std::lock_guard<std::mutex> lock(gBorderlessFullscreenMutex);
+        auto iterator = gBorderlessFullscreenStates.find(hwnd);
+        if (iterator != gBorderlessFullscreenStates.end()) {
+            state = iterator->second;
+            gBorderlessFullscreenStates.erase(iterator);
+            hasState = true;
+        }
+    }
+    if (!hasState) return;
+
+    SetWindowLongPtrW(hwnd, GWL_STYLE, state.style);
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, state.exStyle);
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        0,
+        0,
+        0,
+        0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE
+    );
+
+    state.placement.length = sizeof(WINDOWPLACEMENT);
+    const bool restoreMaximized = state.placement.showCmd == SW_SHOWMAXIMIZED;
+    if (restoreMaximized) {
+        WINDOWPLACEMENT normalPlacement = state.placement;
+        normalPlacement.showCmd = SW_SHOWNORMAL;
+        SetWindowPlacement(hwnd, &normalPlacement);
+        ShowWindow(hwnd, SW_MAXIMIZE);
+        return;
+    }
+
+    SetWindowPlacement(hwnd, &state.placement);
 }
 
 bool containsCaseInsensitive(const std::string &haystack, const std::string &needle) {
@@ -362,6 +477,7 @@ void registerWindowClasses() {
 
         WNDCLASSEXW containerClass = {};
         containerClass.cbSize = sizeof(containerClass);
+        containerClass.style = CS_DBLCLKS;
         containerClass.lpfnWndProc = containerWindowProc;
         containerClass.hInstance = gModule;
         containerClass.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
@@ -598,6 +714,8 @@ public:
         long long initialPositionMs,
         const std::string &controlsUrl,
         JavaVM *vm,
+        int decoderPriority,
+        bool nvidiaRtxSuperResolutionEnabled,
         jobject sink,
         jmethodID method
     ) {
@@ -613,8 +731,8 @@ public:
         auto initState = std::make_shared<InitializationState>();
         auto self = shared_from_this();
         uiThread = std::thread(
-            [self, sourceUrl, headerLines, playWhenReady, initialPositionMs, controlsUrl, initState]() {
-                self->runNativeUiThread(sourceUrl, headerLines, playWhenReady, initialPositionMs, controlsUrl, initState);
+            [self, sourceUrl, headerLines, playWhenReady, initialPositionMs, controlsUrl, decoderPriority, nvidiaRtxSuperResolutionEnabled, initState]() {
+                self->runNativeUiThread(sourceUrl, headerLines, playWhenReady, initialPositionMs, controlsUrl, decoderPriority, nvidiaRtxSuperResolutionEnabled, initState);
             }
         );
 
@@ -703,6 +821,12 @@ public:
         });
     }
 
+    void requestFocus() {
+        postUiTask([self = shared_from_this()]() {
+            self->focusNativeControls();
+        });
+    }
+
     void setPaused(bool paused) {
         std::lock_guard<std::mutex> lock(mpvMutex);
         if (!mpv) return;
@@ -741,14 +865,41 @@ public:
         return doubleProperty("speed", 1.0);
     }
 
+    void adjustVolume(double delta) {
+        std::lock_guard<std::mutex> lock(mpvMutex);
+        if (!mpv) return;
+        double current = 100.0;
+        mpvApi().getProperty(mpv, "volume", MPV_FORMAT_DOUBLE, &current);
+        double next = std::max(0.0, std::min(100.0, current + delta));
+        mpvApi().setProperty(mpv, "volume", MPV_FORMAT_DOUBLE, &next);
+    }
+
+    void setVolume(double level) {
+        std::lock_guard<std::mutex> lock(mpvMutex);
+        if (!mpv) return;
+        double next = std::max(0.0, std::min(100.0, level * 100.0));
+        mpvApi().setProperty(mpv, "volume", MPV_FORMAT_DOUBLE, &next);
+    }
+
+    double volume() {
+        return std::max(0.0, std::min(100.0, doubleProperty("volume", 100.0))) / 100.0;
+    }
+
     void setResizeMode(int mode) {
         switch (mode) {
             case 1:
             case 2:
+                setStringProperty("keepaspect", "yes");
                 setStringProperty("panscan", "1.0");
                 setStringProperty("video-unscaled", "no");
                 break;
+            case 3:
+                setStringProperty("keepaspect", "no");
+                setStringProperty("panscan", "0.0");
+                setStringProperty("video-unscaled", "no");
+                break;
             default:
+                setStringProperty("keepaspect", "yes");
                 setStringProperty("panscan", "0.0");
                 setStringProperty("video-unscaled", "no");
                 break;
@@ -858,7 +1009,7 @@ public:
             std::lock_guard<std::mutex> lock(mpvMutex);
             if (!mpv) return;
             double outline = std::max(0.0, std::min(8.0, outlineSize));
-            double size = std::max(24.0, std::min(96.0, fontSize));
+            double size = std::max(18.0, std::min(96.0, fontSize));
             int64_t position = std::max(0, std::min(150, subPos));
             mpvApi().setProperty(mpv, "sub-outline-size", MPV_FORMAT_DOUBLE, &outline);
             mpvApi().setProperty(mpv, "sub-font-size", MPV_FORMAT_DOUBLE, &size);
@@ -878,6 +1029,7 @@ private:
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> webView;
     EventRegistrationToken messageToken = {};
+    EventRegistrationToken acceleratorToken = {};
 
     std::mutex uiTaskMutex;
     std::deque<std::function<void()>> uiTasks;
@@ -887,6 +1039,7 @@ private:
     std::thread eventThread;
     std::atomic_bool stopping = false;
     std::atomic_bool shuttingDown = false;
+    std::atomic_bool hwdecLogged = false;  // one-shot log for hwdec-current
 
     JavaVM *javaVm = nullptr;
     jobject eventSink = nullptr;
@@ -906,11 +1059,13 @@ private:
         bool playWhenReady,
         long long initialPositionMs,
         std::string controlsUrl,
+        int decoderPriority,
+        bool nvidiaRtxSuperResolutionEnabled,
         std::shared_ptr<InitializationState> initState
     ) {
         std::string failure;
         try {
-            initializeOnNativeUiThread(sourceUrl, headerLines, playWhenReady, initialPositionMs, controlsUrl);
+            initializeOnNativeUiThread(sourceUrl, headerLines, playWhenReady, initialPositionMs, controlsUrl, decoderPriority, nvidiaRtxSuperResolutionEnabled);
         } catch (const std::exception &error) {
             failure = error.what();
             cleanupUiResources();
@@ -939,7 +1094,9 @@ private:
         const std::vector<std::string> &headerLines,
         bool playWhenReady,
         long long initialPositionMs,
-        const std::string &controlsUrl
+        const std::string &controlsUrl,
+        int decoderPriority,
+        bool nvidiaRtxSuperResolutionEnabled
     ) {
         registerWindowClasses();
         uiThreadId = GetCurrentThreadId();
@@ -971,6 +1128,7 @@ private:
         GetClientRect(hostHwnd, &bounds);
         LONG width = std::max<LONG>(1, bounds.right - bounds.left);
         LONG height = std::max<LONG>(1, bounds.bottom - bounds.top);
+
         containerHwnd = CreateWindowExW(
             0,
             kContainerWindowClass,
@@ -990,7 +1148,7 @@ private:
         }
 
         startWebView(controlsUrl);
-        startMpv(sourceUrl, headerLines, playWhenReady, initialPositionMs);
+        startMpv(sourceUrl, headerLines, playWhenReady, initialPositionMs, decoderPriority, nvidiaRtxSuperResolutionEnabled);
         layoutNativeSubviews();
         if (!SetTimer(messageHwnd, NUVIO_TIMER_ID, 500, nullptr)) {
             throw std::runtime_error("Unable to start native player timer.");
@@ -1004,6 +1162,10 @@ private:
         if (webView && messageToken.value != 0) {
             webView->remove_WebMessageReceived(messageToken);
             messageToken.value = 0;
+        }
+        if (controller && acceleratorToken.value != 0) {
+            controller->remove_AcceleratorKeyPressed(acceleratorToken);
+            acceleratorToken.value = 0;
         }
         if (controller) {
             controller->Close();
@@ -1105,6 +1267,33 @@ private:
                                 }
 
                                 if (controllerSelf->webView) {
+                                    auto acceleratorWeakSelf = controllerWeakSelf;
+                                    controllerSelf->controller->add_AcceleratorKeyPressed(
+                                        Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+                                            [acceleratorWeakSelf](ICoreWebView2Controller *, ICoreWebView2AcceleratorKeyPressedEventArgs *args) -> HRESULT {
+                                                auto acceleratorSelf = acceleratorWeakSelf.lock();
+                                                if (!acceleratorSelf || acceleratorSelf->shuttingDown.load() || !args) return S_OK;
+
+                                                COREWEBVIEW2_KEY_EVENT_KIND keyEventKind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+                                                UINT virtualKey = 0;
+                                                args->get_KeyEventKind(&keyEventKind);
+                                                args->get_VirtualKey(&virtualKey);
+                                                if (
+                                                    virtualKey == VK_F11 &&
+                                                    (
+                                                        keyEventKind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN ||
+                                                        keyEventKind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+                                                    )
+                                                ) {
+                                                    args->put_Handled(TRUE);
+                                                    acceleratorSelf->sendPlayerEvent("toggleFullscreen", 0.0);
+                                                }
+                                                return S_OK;
+                                            }
+                                        ).Get(),
+                                        &controllerSelf->acceleratorToken
+                                    );
+
                                     auto messageWeakSelf = controllerWeakSelf;
                                     controllerSelf->webView->add_WebMessageReceived(
                                         Callback<ICoreWebView2WebMessageReceivedEventHandler>(
@@ -1144,7 +1333,9 @@ private:
         const std::string &sourceUrl,
         const std::vector<std::string> &headerLines,
         bool playWhenReady,
-        long long initialPositionMs
+        long long initialPositionMs,
+        int decoderPriority,
+        bool nvidiaRtxSuperResolutionEnabled
     ) {
         MpvApi &api = mpvApi();
         {
@@ -1162,20 +1353,36 @@ private:
             setMpvOptionStringLocked("keep-open", "yes");
             setMpvOptionStringLocked("vo", "gpu-next");
             setMpvOptionStringLocked("gpu-api", "d3d11");
-            setMpvOptionStringLocked("hwdec", "d3d11va");
+            if (nvidiaRtxSuperResolutionEnabled) {
+                setMpvOptionStringLocked("hwdec", "d3d11va");
+                setMpvOptionStringLocked("d3d11-adapter", "NVIDIA");
+            } else {
+                setMpvOptionStringLocked("hwdec", "auto");
+            }
             setMpvOptionStringLocked("hwdec-codecs", "all");
-            setMpvOptionStringLocked("vd-lavc-software-fallback", "no");
-            setMpvOptionStringLocked("vd-lavc-threads", "4");
+
+            if (nvidiaRtxSuperResolutionEnabled) {
+                setMpvOptionStringLocked("vf", "d3d11vpp=scale=2:scaling-mode=nvidia");
+            }
             setMpvOptionStringLocked("target-colorspace-hint", "yes");
+            if (decoderPriority == 0) {
+                setMpvOptionStringLocked("vd-lavc-software-fallback", "no");
+            } else if (decoderPriority == 2) {
+                setMpvOptionStringLocked("hwdec", "no");
+                setMpvOptionStringLocked("vd-lavc-software-fallback", "yes");
+            } else {
+                setMpvOptionStringLocked("vd-lavc-software-fallback", "yes");
+            }
+            setMpvOptionStringLocked("vd-lavc-threads", "4");
             setMpvOptionStringLocked("tone-mapping", "auto");
             setMpvOptionStringLocked("dither-depth", "auto");
             setMpvOptionStringLocked("deband", "yes");
             setMpvOptionStringLocked("scale", "spline36");
             setMpvOptionStringLocked("cscale", "spline36");
-            setMpvOptionStringLocked("demuxer-max-bytes", "64MiB");
-            setMpvOptionStringLocked("demuxer-max-back-bytes", "16MiB");
-            setMpvOptionStringLocked("demuxer-seekable-cache", "no");
-            setMpvOptionStringLocked("cache-secs", "30");
+            setMpvOptionStringLocked("demuxer-max-bytes", "512MiB");
+            setMpvOptionStringLocked("demuxer-max-back-bytes", "256MiB");
+            setMpvOptionStringLocked("demuxer-seekable-cache", "yes");
+            setMpvOptionStringLocked("cache-secs", "120");
             setMpvOptionStringLocked("hr-seek", "no");
 
             int64_t wid = (int64_t)(intptr_t)containerHwnd;
@@ -1188,7 +1395,11 @@ private:
                 std::string headers;
                 for (size_t index = 0; index < headerLines.size(); index++) {
                     if (index > 0) headers.push_back(',');
-                    headers += headerLines[index];
+                    // Escape backslashes and commas in header values
+                    for (char c : headerLines[index]) {
+                        if (c == '\\' || c == ',') headers.push_back('\\');
+                        headers.push_back(c);
+                    }
                 }
                 setMpvOptionStringLocked("http-header-fields", headers.c_str());
             }
@@ -1236,6 +1447,22 @@ private:
             RECT webBounds = {0, 0, width, height};
             controller->put_Bounds(webBounds);
             controller->put_IsVisible(TRUE);
+        }
+    }
+
+    void focusNativeControls() {
+        if (containerHwnd && IsWindow(containerHwnd)) {
+            SetFocus(containerHwnd);
+        }
+        if (controller) {
+            controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
+        if (webView && controlsWebReady.load()) {
+            webView->ExecuteScript(
+                L"(function(){var root=document.getElementById('playerRoot');"
+                L"if(root){root.focus({preventScroll:true});}})()",
+                nullptr
+            );
         }
     }
 
@@ -1682,7 +1909,18 @@ LRESULT CALLBACK containerWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPA
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
         return TRUE;
     }
+    auto *player = reinterpret_cast<WindowsMpvWebPlayer *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (message) {
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            if (wParam == VK_F11) {
+                if (player) player->sendPlayerEvent("toggleFullscreen", 0.0);
+                return 0;
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+        case WM_LBUTTONDBLCLK:
+            if (player) player->sendPlayerEvent("toggleFullscreen", 0.0);
+            return 0;
         case WM_SIZE:
             return 0;
         case WM_ERASEBKGND: {
@@ -1725,6 +1963,8 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     jboolean playWhenReady,
     jlong initialPositionMs,
     jstring controlsPageUrl,
+    jint decoderPriority,
+    jboolean nvidiaRtxSuperResolutionEnabled,
     jobject eventSink
 ) {
     HWND hostHwnd = (HWND)(intptr_t)hostViewPtr;
@@ -1758,6 +1998,8 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
             initialPositionMs,
             controlsPageUrlText,
             javaVm,
+            decoderPriority,
+            nvidiaRtxSuperResolutionEnabled == JNI_TRUE,
             eventSinkRef,
             eventMethod
         );
@@ -1800,6 +2042,12 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_updateControls(JNI
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_requestFocus(JNIEnv *, jobject, jlong handle) {
+    auto player = playerFromHandle(handle);
+    if (player) player->requestFocus();
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setPaused(JNIEnv *, jobject, jlong handle, jboolean paused) {
     auto player = playerFromHandle(handle);
     if (player) player->setPaused(paused == JNI_TRUE);
@@ -1821,6 +2069,18 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setSpeed(JNIEnv *, jobject, jlong handle, jfloat speed) {
     auto player = playerFromHandle(handle);
     if (player) player->setSpeed(speed);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_adjustVolume(JNIEnv *, jobject, jlong handle, jfloat delta) {
+    auto player = playerFromHandle(handle);
+    if (player) player->adjustVolume(delta);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setVolume(JNIEnv *, jobject, jlong handle, jfloat level) {
+    auto player = playerFromHandle(handle);
+    if (player) player->setVolume(level);
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -1863,6 +2123,12 @@ extern "C" JNIEXPORT jfloat JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_speed(JNIEnv *, jobject, jlong handle) {
     auto player = playerFromHandle(handle);
     return player ? (jfloat)player->speed() : 1.0f;
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_volume(JNIEnv *, jobject, jlong handle) {
+    auto player = playerFromHandle(handle);
+    return player ? (jfloat)player->volume() : 1.0f;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -1929,6 +2195,27 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_applyWindowChrome(
         rgbIntToColorRef(captionColorRgb),
         rgbIntToColorRef(borderColorRgb),
         rgbIntToColorRef(textColorRgb)
+    );
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setWindowBorderlessFullscreen(
+    JNIEnv *,
+    jobject,
+    jlong windowHwnd,
+    jboolean fullscreen,
+    jint x,
+    jint y,
+    jint width,
+    jint height
+) {
+    setBorderlessFullscreen(
+        (HWND)(intptr_t)windowHwnd,
+        fullscreen == JNI_TRUE,
+        x,
+        y,
+        width,
+        height
     );
 }
 

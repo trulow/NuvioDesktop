@@ -1,9 +1,7 @@
 package com.nuvio.app.features.home.components
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -26,7 +24,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.contentColorFor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,11 +46,11 @@ import com.nuvio.app.core.ui.NuvioAsyncImage as AsyncImage
 import com.nuvio.app.core.ui.NuvioProgressBar
 import com.nuvio.app.core.ui.NuvioShelfSection
 import com.nuvio.app.core.ui.PosterLandscapeAspectRatio
+import com.nuvio.app.core.ui.desktopCatalogShelfPosterBaseWidthDp
 import com.nuvio.app.core.ui.landscapePosterHeightForWidth
 import com.nuvio.app.core.ui.landscapePosterWidth
 import com.nuvio.app.core.ui.posterCardClickable
 import com.nuvio.app.core.ui.rememberPosterCardStyleUiState
-import com.nuvio.app.core.ui.secondaryClick
 import com.nuvio.app.features.cloud.CloudLibraryContentType
 import com.nuvio.app.features.cloud.cloudLibraryDisplayArtworkUrl
 import com.nuvio.app.features.home.HomeCatalogSettingsRepository
@@ -242,66 +239,43 @@ private fun HomeContinueWatchingSectionContent(
         HomeCatalogSettingsRepository.uiState
     }.collectAsStateWithLifecycle()
 
-    val itemOrderKey = remember(items) {
-        items.joinToString(separator = "|") { item -> item.continueWatchingRowOrderKey() }
-    }
-
-    key(itemOrderKey) {
-        NuvioShelfSection(
-            title = stringResource(Res.string.compose_settings_page_continue_watching),
-            entries = items,
-            modifier = modifier,
-            headerHorizontalPadding = sectionPadding,
-            rowContentPadding = PaddingValues(horizontal = sectionPadding),
-            itemSpacing = layout.itemGap,
-            showHeaderAccent = !homeCatalogSettings.hideCatalogUnderline,
-            key = { item -> item.videoId },
-        ) { item ->
-            when (style) {
-                ContinueWatchingSectionStyle.Card -> ContinueWatchingCard(
-                    item = item,
-                    useEpisodeThumbnails = useEpisodeThumbnails,
-                    blurNextUp = blurNextUp,
-                    onClick = onItemClick?.let { { it(item) } },
-                    onLongClick = onItemLongPress?.let { { it(item) } },
-                )
-                ContinueWatchingSectionStyle.Wide -> ContinueWatchingWideCard(
-                    item = item,
-                    layout = layout,
-                    useEpisodeThumbnails = useEpisodeThumbnails,
-                    blurNextUp = blurNextUp,
-                    onClick = onItemClick?.let { { it(item) } },
-                    onLongClick = onItemLongPress?.let { { it(item) } },
-                )
-                ContinueWatchingSectionStyle.Poster -> ContinueWatchingPosterCard(
-                    item = item,
-                    layout = layout,
-                    useEpisodeThumbnails = useEpisodeThumbnails,
-                    blurNextUp = blurNextUp,
-                    onClick = onItemClick?.let { { it(item) } },
-                    onLongClick = onItemLongPress?.let { { it(item) } },
-                )
-            }
+    NuvioShelfSection(
+        title = stringResource(Res.string.compose_settings_page_continue_watching),
+        entries = items,
+        modifier = modifier,
+        headerHorizontalPadding = sectionPadding,
+        rowContentPadding = PaddingValues(horizontal = sectionPadding),
+        itemSpacing = layout.itemGap,
+        showHeaderAccent = !homeCatalogSettings.hideCatalogUnderline,
+        key = { item -> item.videoId },
+    ) { item ->
+        when (style) {
+            ContinueWatchingSectionStyle.Card -> ContinueWatchingCard(
+                item = item,
+                useEpisodeThumbnails = useEpisodeThumbnails,
+                blurNextUp = blurNextUp,
+                onClick = onItemClick?.let { { it(item) } },
+                onLongClick = onItemLongPress?.let { { it(item) } },
+            )
+            ContinueWatchingSectionStyle.Wide -> ContinueWatchingWideCard(
+                item = item,
+                layout = layout,
+                useEpisodeThumbnails = useEpisodeThumbnails,
+                blurNextUp = blurNextUp,
+                onClick = onItemClick?.let { { it(item) } },
+                onLongClick = onItemLongPress?.let { { it(item) } },
+            )
+            ContinueWatchingSectionStyle.Poster -> ContinueWatchingPosterCard(
+                item = item,
+                layout = layout,
+                useEpisodeThumbnails = useEpisodeThumbnails,
+                blurNextUp = blurNextUp,
+                onClick = onItemClick?.let { { it(item) } },
+                onLongClick = onItemLongPress?.let { { it(item) } },
+            )
         }
     }
 }
-
-private fun ContinueWatchingItem.continueWatchingRowOrderKey(): String =
-    buildString {
-        append(if (isNextUp) "next" else "progress")
-        append(':')
-        append(parentMetaId)
-        append(':')
-        append(videoId)
-        append(':')
-        append(seasonNumber)
-        append('x')
-        append(episodeNumber)
-        append(":seed=")
-        append(nextUpSeedSeasonNumber)
-        append('x')
-        append(nextUpSeedEpisodeNumber)
-    }
 
 @Composable
 fun ContinueWatchingStylePreview(
@@ -577,7 +551,6 @@ private fun continueWatchingLandscapeCardMetrics(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ContinueWatchingCard(
     item: ContinueWatchingItem,
@@ -588,8 +561,9 @@ private fun ContinueWatchingCard(
 ) {
     val posterCardStyle = rememberPosterCardStyleUiState()
     val cardMetrics = remember(posterCardStyle.widthDp, posterCardStyle.cornerRadiusDp) {
+        val basePosterWidthDp = desktopCatalogShelfPosterBaseWidthDp(posterCardStyle.widthDp)
         continueWatchingLandscapeCardMetrics(
-            basePosterWidthDp = posterCardStyle.widthDp,
+            basePosterWidthDp = basePosterWidthDp,
             cornerRadiusDp = posterCardStyle.cornerRadiusDp,
         )
     }
@@ -621,11 +595,11 @@ private fun ContinueWatchingCard(
 
     Box(
         modifier = Modifier
+            .posterCardClickable(onClick = onClick, onLongClick = onLongClick)
             .width(cardMetrics.width)
             .aspectRatio(PosterLandscapeAspectRatio)
             .clip(RoundedCornerShape(cardMetrics.cornerRadius))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .posterCardClickable(onClick = onClick, onLongClick = onLongClick),
+            .background(MaterialTheme.colorScheme.surfaceVariant),
     ) {
         if (imageUrl != null) {
             AsyncImage(
@@ -779,7 +753,6 @@ private fun continueWatchingCardBadgeText(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ContinueWatchingWideCard(
     item: ContinueWatchingItem,
@@ -791,6 +764,7 @@ private fun ContinueWatchingWideCard(
 ) {
     Row(
         modifier = Modifier
+            .posterCardClickable(onClick = onClick, onLongClick = onLongClick)
             .width(layout.wideCardWidth)
             .height(layout.wideCardHeight)
             .clip(RoundedCornerShape(layout.cardRadius))
@@ -799,13 +773,7 @@ private fun ContinueWatchingWideCard(
                 width = 1.5.dp,
                 color = Color.White.copy(alpha = 0.15f),
                 shape = RoundedCornerShape(layout.cardRadius),
-            )
-            .combinedClickable(
-                enabled = onClick != null || onLongClick != null,
-                onClick = { onClick?.invoke() },
-                onLongClick = onLongClick,
-            )
-            .secondaryClick(onLongClick),
+            ),
     ) {
         val shouldBlurArtwork = blurNextUp && useEpisodeThumbnails && item.isNextUp
         val artworkUrl = item.continueWatchingArtworkUrl(useEpisodeThumbnails)
@@ -907,7 +875,6 @@ private fun ContinueWatchingWideCard(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ContinueWatchingPosterCard(
     item: ContinueWatchingItem,
@@ -918,7 +885,9 @@ private fun ContinueWatchingPosterCard(
     onLongClick: (() -> Unit)?,
 ) {
     Column(
-        modifier = Modifier.width(layout.posterCardWidth),
+        modifier = Modifier
+            .posterCardClickable(onClick = onClick, onLongClick = onLongClick)
+            .width(layout.posterCardWidth),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Box(
@@ -926,8 +895,7 @@ private fun ContinueWatchingPosterCard(
                 .fillMaxWidth()
                 .height(layout.posterCardHeight)
                 .clip(RoundedCornerShape(layout.cardRadius))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .posterCardClickable(onClick = onClick, onLongClick = onLongClick),
+                .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             val imageUrl = item.continueWatchingPosterArtworkUrl(useEpisodeThumbnails)
             val shouldBlurArtwork = blurNextUp &&

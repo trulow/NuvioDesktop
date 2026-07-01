@@ -79,16 +79,10 @@ object ProfileSettingsSync {
     @Volatile
     private var skipNextPushSignature: String? = null
 
-    @Volatile
-    private var preservedRemotePlayerSettings: JsonObject? = null
-
-    @Volatile
-    private var preservedRemotePlayerSettingsProfileId: Int? = null
-
     private var observeJob: Job? = null
 
-    private val syncPlayerSettings: Boolean
-        get() = !isDesktop
+    private val profileSettingsPlatform: String
+        get() = if (isDesktop) DESKTOP_SYNC_PLATFORM else MOBILE_SYNC_PLATFORM
 
     fun startObserving() {
         if (observeJob?.isActive == true) return
@@ -99,14 +93,19 @@ object ProfileSettingsSync {
     suspend fun pull(profileId: Int): Boolean {
         ensureRepositoriesLoaded()
         return syncMutex.withLock {
+            if (ProfileRepository.activeProfileId != profileId) {
+                log.d { "pull(profileId=$profileId) — skipped because profile is no longer active" }
+                return@withLock false
+            }
             isServerSyncInFlight = true
             try {
                 val remoteJson = fetchRemoteSettingsJson(profileId)
+                if (ProfileRepository.activeProfileId != profileId) return@withLock false
 
                 if (remoteJson == null) {
                     log.i { "pull(profileId=$profileId) — no remote settings blob found" }
-                    clearPreservedRemotePlayerSettings(profileId)
-                    val localBlob = exportSettingsBlob(profileId)
+                    if (ProfileRepository.activeProfileId != profileId) return@withLock false
+                    val localBlob = exportSettingsBlob()
                     val localSignature = buildSignature(localBlob)
                     if (localSignature != defaultSignature()) {
                         pushToRemoteLocked(profileId, localBlob)
@@ -123,9 +122,7 @@ object ProfileSettingsSync {
                         return@withLock false
                     }
 
-                    preserveRemotePlayerSettings(profileId, remoteBlob)
-
-                    val localBlob = exportSettingsBlob(profileId)
+                    val localBlob = exportSettingsBlob()
                     val localSignature = buildSignature(localBlob)
                     val remoteSignature = buildSignature(remoteBlob)
                     if (remoteSignature == localSignature) {
@@ -133,7 +130,8 @@ object ProfileSettingsSync {
                         return@withLock false
                     }
 
-                    applyRemoteBlob(profileId, remoteBlob)
+                    if (ProfileRepository.activeProfileId != profileId) return@withLock false
+                    applyRemoteBlob(remoteBlob)
                     skipNextPushSignature = currentObservedStateSignature()
                 } finally {
                     isApplyingRemoteBlob = false
@@ -155,7 +153,9 @@ object ProfileSettingsSync {
         syncMutex.withLock {
             runCatching {
                 val profileId = ProfileRepository.activeProfileId
-                pushToRemoteLocked(profileId, exportSettingsBlob(profileId))
+                val blob = exportSettingsBlob()
+                if (ProfileRepository.activeProfileId != profileId) return@runCatching
+                pushToRemoteLocked(profileId, blob)
             }.onFailure { error ->
                 log.e(error) { "pushCurrentProfileToRemote() — FAILED" }
             }
@@ -169,9 +169,7 @@ object ProfileSettingsSync {
             add(ThemeSettingsRepository.amoledEnabled.map { "amoled" })
             add(ThemeSettingsRepository.liquidGlassNativeTabBarEnabled.map { "liquid_glass_tab_bar" })
             add(PosterCardStyleRepository.uiState.map { "poster_card_style" })
-            if (syncPlayerSettings) {
-                add(PlayerSettingsRepository.uiState.map { "player" })
-            }
+            add(PlayerSettingsRepository.uiState.map { "player" })
             add(StreamBadgeSettingsRepository.uiState.map { "stream_badges" })
             add(DebridSettingsRepository.uiState.map { "debrid" })
             add(TmdbSettingsRepository.uiState.map { "tmdb" })
@@ -203,23 +201,22 @@ object ProfileSettingsSync {
     }
 
     private suspend fun pushToRemoteLocked(profileId: Int, blob: MobileProfileSettingsBlob) {
-        val blobToPush = withPreservedDesktopPlayerSettings(profileId, blob)
         val params = buildJsonObject {
             put("p_profile_id", profileId)
-            put("p_platform", MOBILE_SYNC_PLATFORM)
-            put("p_settings_json", json.encodeToJsonElement(MobileProfileSettingsBlob.serializer(), blobToPush))
+            put("p_platform", profileSettingsPlatform)
+            put("p_settings_json", json.encodeToJsonElement(MobileProfileSettingsBlob.serializer(), blob))
         }
         SupabaseProvider.client.postgrest.rpc("sync_push_profile_settings_blob", params)
-        log.d { "pushToRemoteLocked(profileId=$profileId) — success" }
+        log.d { "pushToRemoteLocked(profileId=$profileId, platform=$profileSettingsPlatform) — success" }
     }
 
-    private fun exportSettingsBlob(profileId: Int = ProfileRepository.activeProfileId): MobileProfileSettingsBlob {
+    private fun exportSettingsBlob(): MobileProfileSettingsBlob {
         ensureRepositoriesLoaded()
         return MobileProfileSettingsBlob(
             features = MobileProfileSettingsFeatures(
                 themeSettings = ThemeSettingsStorage.exportToSyncPayload(),
                 posterCardStyleSettingsPayload = PosterCardStyleStorage.loadPayload().orEmpty().trim(),
-                playerSettings = exportPlayerSettingsPayload(profileId),
+                playerSettings = PlayerSettingsStorage.exportToSyncPayload(),
                 streamBadgeSettings = StreamBadgeSettingsStorage.exportToSyncPayload(),
                 debridSettings = DebridSettingsStorage.exportToSyncPayload(),
                 tmdbSettings = TmdbSettingsStorage.exportToSyncPayload(),
@@ -236,19 +233,15 @@ object ProfileSettingsSync {
         )
     }
 
-    private fun applyRemoteBlob(profileId: Int, blob: MobileProfileSettingsBlob) {
+    private fun applyRemoteBlob(blob: MobileProfileSettingsBlob) {
         ThemeSettingsStorage.replaceFromSyncPayload(blob.features.themeSettings)
         ThemeSettingsRepository.onProfileChanged()
 
         PosterCardStyleStorage.savePayload(blob.features.posterCardStyleSettingsPayload)
         PosterCardStyleRepository.onProfileChanged()
 
-        if (syncPlayerSettings) {
-            PlayerSettingsStorage.replaceFromSyncPayload(blob.features.playerSettings)
-            PlayerSettingsRepository.onProfileChanged()
-        } else {
-            preserveRemotePlayerSettings(profileId, blob)
-        }
+        PlayerSettingsStorage.replaceFromSyncPayload(blob.features.playerSettings)
+        PlayerSettingsRepository.onProfileChanged()
 
         StreamBadgeSettingsStorage.replaceFromSyncPayload(blob.features.streamBadgeSettings)
         StreamBadgeSettingsRepository.onProfileChanged()
@@ -284,9 +277,7 @@ object ProfileSettingsSync {
     private fun ensureRepositoriesLoaded() {
         ThemeSettingsRepository.ensureLoaded()
         PosterCardStyleRepository.ensureLoaded()
-        if (syncPlayerSettings) {
-            PlayerSettingsRepository.ensureLoaded()
-        }
+        PlayerSettingsRepository.ensureLoaded()
         StreamBadgeSettingsRepository.ensureLoaded()
         DebridSettingsRepository.ensureLoaded()
         TmdbSettingsRepository.ensureLoaded()
@@ -310,9 +301,7 @@ object ProfileSettingsSync {
         add("amoled=${ThemeSettingsRepository.amoledEnabled.value}")
         add("liquid_glass_tab_bar=${ThemeSettingsRepository.liquidGlassNativeTabBarEnabled.value}")
         add("poster_card_style=${PosterCardStyleRepository.uiState.value}")
-        if (syncPlayerSettings) {
-            add("player=${PlayerSettingsRepository.uiState.value}")
-        }
+        add("player=${PlayerSettingsRepository.uiState.value}")
         add("stream_badges=${StreamBadgeSettingsRepository.uiState.value}")
         add("debrid=${DebridSettingsRepository.uiState.value}")
         add("tmdb=${TmdbSettingsRepository.uiState.value}")
@@ -325,66 +314,10 @@ object ProfileSettingsSync {
         add("episode_release_alerts=${EpisodeReleaseNotificationsRepository.uiState.value.isEnabled}")
     }.joinToString(separator = "||")
 
-    private fun exportPlayerSettingsPayload(profileId: Int): JsonObject =
-        if (syncPlayerSettings) {
-            PlayerSettingsStorage.exportToSyncPayload()
-        } else {
-            preservedRemotePlayerSettingsFor(profileId) ?: JsonObject(emptyMap())
-        }
-
-    private fun preserveRemotePlayerSettings(profileId: Int, blob: MobileProfileSettingsBlob) {
-        if (!syncPlayerSettings) {
-            preservedRemotePlayerSettingsProfileId = profileId
-            preservedRemotePlayerSettings = blob.features.playerSettings
-        }
-    }
-
-    private fun clearPreservedRemotePlayerSettings(profileId: Int) {
-        if (!syncPlayerSettings) {
-            preservedRemotePlayerSettingsProfileId = profileId
-            preservedRemotePlayerSettings = null
-        }
-    }
-
-    private fun preservedRemotePlayerSettingsFor(profileId: Int): JsonObject? =
-        preservedRemotePlayerSettings
-            ?.takeIf { preservedRemotePlayerSettingsProfileId == profileId }
-
-    private suspend fun withPreservedDesktopPlayerSettings(
-        profileId: Int,
-        blob: MobileProfileSettingsBlob,
-    ): MobileProfileSettingsBlob {
-        if (syncPlayerSettings) return blob
-
-        val remoteBlobResult = runCatching {
-            fetchRemoteSettingsJson(profileId)
-                ?.let { remoteJson ->
-                    json.decodeFromJsonElement(MobileProfileSettingsBlob.serializer(), remoteJson)
-                }
-        }
-        val remotePlayerSettings = if (remoteBlobResult.isSuccess) {
-            remoteBlobResult.getOrNull()?.features?.playerSettings ?: JsonObject(emptyMap())
-        } else {
-            val error = remoteBlobResult.exceptionOrNull()
-            if (error != null) {
-                log.e(error) { "pushToRemoteLocked(profileId=$profileId) — failed to preserve remote player settings" }
-            }
-            preservedRemotePlayerSettingsFor(profileId) ?: throw (error ?: IllegalStateException("Missing remote player settings"))
-        }
-
-        preservedRemotePlayerSettingsProfileId = profileId
-        preservedRemotePlayerSettings = remotePlayerSettings
-        return blob.copy(
-            features = blob.features.copy(
-                playerSettings = remotePlayerSettings,
-            ),
-        )
-    }
-
     private suspend fun fetchRemoteSettingsJson(profileId: Int): JsonObject? {
         val params = buildJsonObject {
             put("p_profile_id", profileId)
-            put("p_platform", MOBILE_SYNC_PLATFORM)
+            put("p_platform", profileSettingsPlatform)
         }
         val result = SupabaseProvider.client.postgrest.rpc("sync_pull_profile_settings_blob", params)
         return result.decodeList<SettingsBlobResponse>().firstOrNull()?.settingsJson

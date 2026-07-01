@@ -55,6 +55,7 @@ internal fun LazyListScope.discoverContent(
     onGenreSelected: (String?) -> Unit,
     onRetry: (() -> Unit)? = null,
     watchedKeys: Set<String> = emptySet(),
+    fullyWatchedSeriesKeys: Set<String> = emptySet(),
     onPosterClick: ((MetaPreview) -> Unit)? = null,
     onPosterLongClick: ((MetaPreview) -> Unit)? = null,
 ) {
@@ -117,6 +118,7 @@ internal fun LazyListScope.discoverContent(
                     columns = columns,
                     modifier = Modifier.padding(horizontal = 16.dp),
                     watchedKeys = watchedKeys,
+                    fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
                     onPosterClick = onPosterClick,
                     onPosterLongClick = onPosterLongClick,
                 )
@@ -197,6 +199,7 @@ private fun DiscoverGridRow(
     columns: Int,
     modifier: Modifier = Modifier,
     watchedKeys: Set<String> = emptySet(),
+    fullyWatchedSeriesKeys: Set<String> = emptySet(),
     onPosterClick: ((MetaPreview) -> Unit)? = null,
     onPosterLongClick: ((MetaPreview) -> Unit)? = null,
 ) {
@@ -216,6 +219,7 @@ private fun DiscoverGridRow(
                 isWatched = WatchingState.isPosterWatched(
                     watchedKeys = watchedKeys,
                     item = item,
+                    fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
                 ),
                 onClick = onPosterClick?.let { { it(item) } },
                 onLongClick = onPosterLongClick?.let { { it(item) } },
@@ -239,7 +243,9 @@ private fun DiscoverPosterTile(
     onLongClick: (() -> Unit)? = null,
 ) {
     Column(
-        modifier = modifier,
+        modifier = Modifier
+            .posterCardClickable(onClick = onClick, onLongClick = onLongClick)
+            .then(modifier),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Box(
@@ -247,8 +253,7 @@ private fun DiscoverPosterTile(
                 .fillMaxWidth()
                 .aspectRatio(item.posterShape.discoverAspectRatio())
                 .clip(RoundedCornerShape(cornerRadiusDp.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .posterCardClickable(onClick = onClick, onLongClick = onLongClick),
+                .background(MaterialTheme.colorScheme.surface),
         ) {
             if (item.poster != null) {
                 AsyncImage(

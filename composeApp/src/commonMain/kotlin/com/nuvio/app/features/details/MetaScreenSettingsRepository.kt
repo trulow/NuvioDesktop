@@ -26,10 +26,15 @@ enum class MetaScreenSectionKey {
     MORE_LIKE_THIS,
     ;
 
-    
+
     val canBeTabbed: Boolean
         get() = this != ACTIONS && this != OVERVIEW
 }
+
+val desktopHeroOwnedMetaSectionKeys: Set<MetaScreenSectionKey> = setOf(
+    MetaScreenSectionKey.ACTIONS,
+    MetaScreenSectionKey.OVERVIEW,
+)
 
 data class MetaScreenSectionItem(
     val key: MetaScreenSectionKey,
@@ -40,9 +45,40 @@ data class MetaScreenSectionItem(
     val tabGroup: Int? = null,
 )
 
+enum class MetaScreenBackgroundMode {
+    Normal,
+    Cinematic,
+    DominantColor,
+    ;
+
+    val usesBackdropBackground: Boolean
+        get() = this != Normal
+
+    companion object {
+        fun parse(raw: String?): MetaScreenBackgroundMode? = when (raw?.lowercase()) {
+            "normal" -> Normal
+            "cinematic" -> Cinematic
+            "dominant_color" -> DominantColor
+            else -> null
+        }
+
+        fun persist(mode: MetaScreenBackgroundMode): String = when (mode) {
+            Normal -> "normal"
+            Cinematic -> "cinematic"
+            DominantColor -> "dominant_color"
+        }
+
+        val Default: MetaScreenBackgroundMode = DominantColor
+
+        fun fromLegacyCinematic(enabled: Boolean): MetaScreenBackgroundMode =
+            if (enabled) Cinematic else Default
+    }
+}
+
 data class MetaScreenSettingsUiState(
     val items: List<MetaScreenSectionItem> = emptyList(),
-    val cinematicBackground: Boolean = false,
+    val backgroundMode: MetaScreenBackgroundMode = MetaScreenBackgroundMode.Default,
+    val cinematicBackground: Boolean = MetaScreenBackgroundMode.Default.usesBackdropBackground,
     val heroTrailerPlayback: Boolean = false,
     val tabLayout: Boolean = false,
     val episodeCardStyle: MetaEpisodeCardStyle = MetaEpisodeCardStyle.Horizontal,
@@ -79,6 +115,8 @@ private data class StoredMetaScreenSectionPreference(
 @Serializable
 private data class StoredMetaScreenSettingsPayload(
     val items: List<StoredMetaScreenSectionPreference> = emptyList(),
+    @SerialName("background_mode")
+    val backgroundMode: String? = null,
     val cinematicBackground: Boolean = false,
     @SerialName("hero_trailer_playback")
     val heroTrailerPlayback: Boolean = false,
@@ -113,6 +151,11 @@ object MetaScreenSettingsRepository {
             descriptionRes = Res.string.meta_section_overview_description,
         ),
         MetaScreenSectionDefinition(
+            key = MetaScreenSectionKey.EPISODES,
+            titleRes = Res.string.settings_meta_episodes,
+            descriptionRes = Res.string.meta_section_episodes_description,
+        ),
+        MetaScreenSectionDefinition(
             key = MetaScreenSectionKey.PRODUCTION,
             titleRes = Res.string.meta_section_production_title,
             descriptionRes = Res.string.meta_section_production_description,
@@ -131,11 +174,6 @@ object MetaScreenSettingsRepository {
             key = MetaScreenSectionKey.TRAILERS,
             titleRes = Res.string.settings_meta_trailers,
             descriptionRes = Res.string.meta_section_trailers_description,
-        ),
-        MetaScreenSectionDefinition(
-            key = MetaScreenSectionKey.EPISODES,
-            titleRes = Res.string.settings_meta_episodes,
-            descriptionRes = Res.string.meta_section_episodes_description,
         ),
         MetaScreenSectionDefinition(
             key = MetaScreenSectionKey.DETAILS,
@@ -159,7 +197,7 @@ object MetaScreenSettingsRepository {
 
     private var hasLoaded = false
     private var preferences: MutableMap<MetaScreenSectionKey, StoredMetaScreenSectionPreference> = mutableMapOf()
-    private var cinematicBackground: Boolean = false
+    private var backgroundMode: MetaScreenBackgroundMode = MetaScreenBackgroundMode.Default
     private var heroTrailerPlayback: Boolean = false
     private var tabLayout: Boolean = false
     private var episodeCardStyle: MetaEpisodeCardStyle = MetaEpisodeCardStyle.Horizontal
@@ -176,7 +214,8 @@ object MetaScreenSettingsRepository {
                 json.decodeFromString<StoredMetaScreenSettingsPayload>(payload)
             }.getOrNull()
             if (parsed != null) {
-                cinematicBackground = parsed.cinematicBackground
+                backgroundMode = MetaScreenBackgroundMode.parse(parsed.backgroundMode)
+                    ?: MetaScreenBackgroundMode.fromLegacyCinematic(parsed.cinematicBackground)
                 heroTrailerPlayback = parsed.heroTrailerPlayback
                 tabLayout = parsed.tabLayout
                 episodeCardStyle = MetaEpisodeCardStyle.parse(parsed.episodeCardStyle)
@@ -197,7 +236,7 @@ object MetaScreenSettingsRepository {
     fun onProfileChanged() {
         hasLoaded = false
         preferences.clear()
-        cinematicBackground = false
+        backgroundMode = MetaScreenBackgroundMode.Default
         heroTrailerPlayback = false
         tabLayout = false
         episodeCardStyle = MetaEpisodeCardStyle.Horizontal
@@ -207,8 +246,12 @@ object MetaScreenSettingsRepository {
     }
 
     fun setCinematicBackground(enabled: Boolean) {
+        setBackgroundMode(MetaScreenBackgroundMode.fromLegacyCinematic(enabled))
+    }
+
+    fun setBackgroundMode(mode: MetaScreenBackgroundMode) {
         ensureLoaded()
-        cinematicBackground = enabled
+        backgroundMode = mode
         publish()
         persist()
     }
@@ -257,7 +300,7 @@ object MetaScreenSettingsRepository {
     fun clearLocalState() {
         hasLoaded = false
         preferences.clear()
-        cinematicBackground = false
+        backgroundMode = MetaScreenBackgroundMode.Default
         heroTrailerPlayback = false
         tabLayout = false
         episodeCardStyle = MetaEpisodeCardStyle.Horizontal
@@ -272,9 +315,10 @@ object MetaScreenSettingsRepository {
         tabLayout: Boolean,
         episodeCardStyle: MetaEpisodeCardStyle = MetaEpisodeCardStyle.Horizontal,
         blurUnwatchedEpisodes: Boolean = false,
+        backgroundMode: MetaScreenBackgroundMode? = null,
     ) {
         ensureLoaded()
-        this.cinematicBackground = cinematicBackground
+        this.backgroundMode = backgroundMode ?: MetaScreenBackgroundMode.fromLegacyCinematic(cinematicBackground)
         this.heroTrailerPlayback = heroTrailerPlayback
         this.tabLayout = tabLayout
         this.episodeCardStyle = episodeCardStyle
@@ -301,7 +345,7 @@ object MetaScreenSettingsRepository {
     fun resetToDefaults() {
         ensureLoaded()
         preferences.clear()
-        cinematicBackground = false
+        backgroundMode = MetaScreenBackgroundMode.Default
         heroTrailerPlayback = false
         tabLayout = false
         episodeCardStyle = MetaEpisodeCardStyle.Horizontal
@@ -311,14 +355,16 @@ object MetaScreenSettingsRepository {
         persist()
     }
 
-    fun moveByIndex(fromIndex: Int, toIndex: Int) {
+    fun moveByKey(fromKey: MetaScreenSectionKey, toKey: MetaScreenSectionKey) {
         ensureLoaded()
+        if (fromKey == toKey) return
         val orderedKeys = definitions
             .sortedBy { definition -> preferences[definition.key]?.order ?: Int.MAX_VALUE }
             .map { it.key }
             .toMutableList()
-        if (fromIndex !in orderedKeys.indices || toIndex !in orderedKeys.indices) return
-        if (fromIndex == toIndex) return
+        val fromIndex = orderedKeys.indexOf(fromKey)
+        val toIndex = orderedKeys.indexOf(toKey)
+        if (fromIndex == -1 || toIndex == -1) return
         orderedKeys.add(toIndex, orderedKeys.removeAt(fromIndex))
         orderedKeys.forEachIndexed { newIndex, sectionKey ->
             val current = preferences[sectionKey] ?: return@forEachIndexed
@@ -369,7 +415,8 @@ object MetaScreenSettingsRepository {
                         tabGroup = preference?.tabGroup,
                     )
                 },
-            cinematicBackground = cinematicBackground,
+            backgroundMode = backgroundMode,
+            cinematicBackground = backgroundMode.usesBackdropBackground,
             heroTrailerPlayback = heroTrailerPlayback,
             tabLayout = tabLayout,
             episodeCardStyle = episodeCardStyle,
@@ -382,7 +429,8 @@ object MetaScreenSettingsRepository {
             json.encodeToString(
                 StoredMetaScreenSettingsPayload(
                     items = preferences.values.sortedBy { it.order },
-                    cinematicBackground = cinematicBackground,
+                    backgroundMode = MetaScreenBackgroundMode.persist(backgroundMode),
+                    cinematicBackground = backgroundMode.usesBackdropBackground,
                     heroTrailerPlayback = heroTrailerPlayback,
                     tabLayout = tabLayout,
                     episodeCardStyle = MetaEpisodeCardStyle.persist(episodeCardStyle),

@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -39,6 +40,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import com.nuvio.app.core.ui.NuvioAsyncImage as AsyncImage
 import com.nuvio.app.core.ui.NuvioBackButton
+import com.nuvio.app.core.ui.FullscreenActionButton
+import com.nuvio.app.core.ui.fullscreenActionHorizontalInsetForWidth
+import com.nuvio.app.core.ui.isFullscreenActionSupported
 import com.nuvio.app.features.details.MetaDetails
 import com.nuvio.app.isIos
 import nuvio.composeapp.generated.resources.*
@@ -49,6 +53,7 @@ fun DetailFloatingHeader(
     meta: MetaDetails,
     isSaved: Boolean,
     progress: Float,
+    backgroundColor: Color? = null,
     onBack: () -> Unit,
     onToggleSaved: () -> Unit,
     modifier: Modifier = Modifier,
@@ -56,7 +61,7 @@ fun DetailFloatingHeader(
     val safeAreaTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val headerTopPadding = (safeAreaTop - 6.dp).coerceAtLeast(safeAreaTop * 0.8f)
     val interactive = progress > 0.05f
-    val surfaceColor = if (isIos) {
+    val surfaceColor = backgroundColor ?: if (isIos) {
         MaterialTheme.colorScheme.surface.copy(alpha = 1.0f)
     } else {
         MaterialTheme.colorScheme.background
@@ -76,6 +81,8 @@ fun DetailFloatingHeader(
             },
     ) {
         val logoWidth = (maxWidth * 0.6f).coerceAtMost(240.dp)
+        val rightActionsWidth = if (isFullscreenActionSupported) 84.dp else 40.dp
+        val actionHorizontalInset = fullscreenActionHorizontalInsetForWidth(maxWidth.value)
 
         Box(
             modifier = Modifier
@@ -86,23 +93,28 @@ fun DetailFloatingHeader(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = headerTopPadding, start = 16.dp, end = 16.dp)
+                    .padding(top = headerTopPadding, start = actionHorizontalInset, end = actionHorizontalInset)
                     .height(56.dp)
                     .graphicsLayer { alpha = progress },
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (interactive) {
-                    NuvioBackButton(
-                        onClick = onBack,
-                        modifier = Modifier.size(40.dp),
-                        containerColor = Color.Transparent,
-                        contentColor = MaterialTheme.colorScheme.onBackground,
-                        buttonSize = 40.dp,
-                        iconSize = 24.dp,
-                    )
-                } else {
-                    Box(modifier = Modifier.size(40.dp))
+                Box(
+                    modifier = Modifier
+                        .width(rightActionsWidth)
+                        .height(40.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    if (interactive) {
+                        NuvioBackButton(
+                            onClick = onBack,
+                            modifier = Modifier.size(40.dp),
+                            containerColor = Color.Transparent,
+                            contentColor = MaterialTheme.colorScheme.onBackground,
+                            buttonSize = 40.dp,
+                            iconSize = 24.dp,
+                        )
+                    }
                 }
 
                 Box(
@@ -134,11 +146,26 @@ fun DetailFloatingHeader(
                     }
                 }
 
-                DetailFloatingHeaderAction(
-                    isSaved = isSaved,
-                    enabled = interactive,
-                    onClick = onToggleSaved,
-                )
+                Row(
+                    modifier = Modifier.width(rightActionsWidth),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    DetailFloatingHeaderAction(
+                        isSaved = isSaved,
+                        enabled = interactive,
+                        onClick = onToggleSaved,
+                    )
+                    if (isFullscreenActionSupported) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        FullscreenActionButton(
+                            enabled = interactive,
+                            buttonSize = 40.dp,
+                            iconSize = 22.dp,
+                            contentColor = MaterialTheme.colorScheme.onBackground,
+                        )
+                    }
+                }
             }
 
             if (isIos) {

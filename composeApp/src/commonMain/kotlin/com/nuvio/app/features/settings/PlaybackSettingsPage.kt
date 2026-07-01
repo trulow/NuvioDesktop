@@ -55,6 +55,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.features.addons.AddonRepository
 import com.nuvio.app.features.addons.enabledAddons
 import com.nuvio.app.features.player.AddonSubtitleStartupMode
+import com.nuvio.app.features.player.AndroidLibmpvVideoOutput
+import com.nuvio.app.features.player.AndroidPlaybackEngine
 import com.nuvio.app.features.player.AudioLanguageOption
 import com.nuvio.app.features.player.AvailableLanguageOptions
 import com.nuvio.app.features.player.ExternalPlayerApp
@@ -71,6 +73,7 @@ import com.nuvio.app.features.player.SubtitleColorSwatches
 import com.nuvio.app.features.player.SubtitleLanguageOption
 import com.nuvio.app.features.player.formatPlaybackSpeedLabel
 import com.nuvio.app.features.player.languageLabelForCode
+import com.nuvio.app.features.player.subtitleFontSizeRangeSp
 import com.nuvio.app.features.player.toStorageHexString
 import com.nuvio.app.features.p2p.P2pConsentDialog
 import com.nuvio.app.features.p2p.P2pSettingsRepository
@@ -78,7 +81,9 @@ import com.nuvio.app.features.plugins.PluginsUiState
 import com.nuvio.app.features.plugins.PluginRepository
 import com.nuvio.app.features.streams.StreamAutoPlayMode
 import com.nuvio.app.features.streams.StreamAutoPlaySource
+import com.nuvio.app.isDesktop
 import com.nuvio.app.isIos
+import com.nuvio.app.isWindows
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.StringResource
@@ -98,6 +103,10 @@ internal fun LazyListScope.playbackSettingsContent(
     secondaryPreferredSubtitleLanguage: String?,
     streamReuseLastLinkEnabled: Boolean,
     streamReuseLastLinkCacheHours: Int,
+    androidPlaybackEngine: AndroidPlaybackEngine,
+    androidLibmpvVideoOutput: AndroidLibmpvVideoOutput,
+    androidLibmpvHardwareDecodingEnabled: Boolean,
+    androidLibmpvYuv420pEnabled: Boolean,
     decoderPriority: Int,
     mapDV7ToHevc: Boolean,
     tunnelingEnabled: Boolean,
@@ -117,6 +126,10 @@ internal fun LazyListScope.playbackSettingsContent(
             secondaryPreferredSubtitleLanguage = secondaryPreferredSubtitleLanguage,
             streamReuseLastLinkEnabled = streamReuseLastLinkEnabled,
             streamReuseLastLinkCacheHours = streamReuseLastLinkCacheHours,
+            androidPlaybackEngine = androidPlaybackEngine,
+            androidLibmpvVideoOutput = androidLibmpvVideoOutput,
+            androidLibmpvHardwareDecodingEnabled = androidLibmpvHardwareDecodingEnabled,
+            androidLibmpvYuv420pEnabled = androidLibmpvYuv420pEnabled,
             decoderPriority = decoderPriority,
             mapDV7ToHevc = mapDV7ToHevc,
             tunnelingEnabled = tunnelingEnabled,
@@ -252,6 +265,10 @@ private fun PlaybackSettingsSection(
     secondaryPreferredSubtitleLanguage: String?,
     streamReuseLastLinkEnabled: Boolean,
     streamReuseLastLinkCacheHours: Int,
+    androidPlaybackEngine: AndroidPlaybackEngine,
+    androidLibmpvVideoOutput: AndroidLibmpvVideoOutput,
+    androidLibmpvHardwareDecodingEnabled: Boolean,
+    androidLibmpvYuv420pEnabled: Boolean,
     decoderPriority: Int,
     mapDV7ToHevc: Boolean,
     tunnelingEnabled: Boolean,
@@ -269,6 +286,8 @@ private fun PlaybackSettingsSection(
     var showExternalPlayerDialog by remember { mutableStateOf(false) }
     var showExternalPlayerAppDialog by remember { mutableStateOf(false) }
     var showReuseCacheDurationDialog by remember { mutableStateOf(false) }
+    var showPlaybackEngineDialog by remember { mutableStateOf(false) }
+    var showLibmpvVideoOutputDialog by remember { mutableStateOf(false) }
     var showDecoderPriorityDialog by remember { mutableStateOf(false) }
     var showHoldToSpeedValueDialog by remember { mutableStateOf(false) }
     var showIosAudioOutputDialog by remember { mutableStateOf(false) }
@@ -283,12 +302,17 @@ private fun PlaybackSettingsSection(
     var showAutoPlayRegexDialog by remember { mutableStateOf(false) }
     var showP2pConsentDialog by remember { mutableStateOf(false) }
     val pluginsEnabled = AppFeaturePolicy.pluginsEnabled
+    val externalPlayerSupported = AppFeaturePolicy.externalPlayerSupported
     val autoPlayPlayerSettings by PlayerSettingsRepository.uiState.collectAsStateWithLifecycle()
     val p2pSettings by remember {
         P2pSettingsRepository.ensureLoaded()
         P2pSettingsRepository.uiState
     }.collectAsStateWithLifecycle()
-    val availableExternalPlayers = ExternalPlayerPlatform.availablePlayers()
+    val availableExternalPlayers = if (externalPlayerSupported) {
+        ExternalPlayerPlatform.availablePlayers()
+    } else {
+        emptyList()
+    }
     val selectedExternalPlayer = availableExternalPlayers.firstOrNull {
         it.id == autoPlayPlayerSettings.externalPlayerId
     }
@@ -317,68 +341,81 @@ private fun PlaybackSettingsSection(
                     isTablet = isTablet,
                     onCheckedChange = PlayerSettingsRepository::setShowLoadingOverlay,
                 )
-                SettingsGroupDivider(isTablet = isTablet)
-                // Player preference picker: Internal / External
-                SettingsNavigationRow(
-                    title = stringResource(Res.string.settings_playback_player_preference),
-                    description = if (autoPlayPlayerSettings.externalPlayerEnabled) {
-                        stringResource(Res.string.settings_playback_player_preference_external)
-                    } else {
-                        stringResource(Res.string.settings_playback_player_preference_internal)
-                    },
-                    isTablet = isTablet,
-                    onClick = { showExternalPlayerDialog = true },
-                )
-                if (isIos && autoPlayPlayerSettings.externalPlayerEnabled) {
+                if (externalPlayerSupported) {
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsNavigationRow(
-                        title = stringResource(Res.string.settings_playback_external_player_app),
-                        description = selectedExternalPlayer?.name
-                            ?: if (availableExternalPlayers.isEmpty()) {
-                                stringResource(Res.string.settings_playback_external_player_none_available)
-                            } else {
-                                stringResource(Res.string.settings_playback_not_set)
-                            },
+                        title = stringResource(Res.string.settings_playback_player_preference),
+                        description = if (autoPlayPlayerSettings.externalPlayerEnabled) {
+                            stringResource(Res.string.settings_playback_player_preference_external)
+                        } else {
+                            stringResource(Res.string.settings_playback_player_preference_internal)
+                        },
                         isTablet = isTablet,
-                        onClick = { showExternalPlayerAppDialog = true },
+                        onClick = { showExternalPlayerDialog = true },
                     )
+                    if (isIos && autoPlayPlayerSettings.externalPlayerEnabled) {
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsNavigationRow(
+                            title = stringResource(Res.string.settings_playback_external_player_app),
+                            description = selectedExternalPlayer?.name
+                                ?: if (availableExternalPlayers.isEmpty()) {
+                                    stringResource(Res.string.settings_playback_external_player_none_available)
+                                } else {
+                                    stringResource(Res.string.settings_playback_not_set)
+                                },
+                            isTablet = isTablet,
+                            onClick = { showExternalPlayerAppDialog = true },
+                        )
+                    }
+                    if (!isIos && autoPlayPlayerSettings.externalPlayerEnabled) {
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsSwitchRow(
+                            title = stringResource(Res.string.settings_playback_external_player_forward_subtitles),
+                            description = stringResource(Res.string.settings_playback_external_player_forward_subtitles_description),
+                            checked = autoPlayPlayerSettings.externalPlayerForwardSubtitles,
+                            isTablet = isTablet,
+                            onCheckedChange = PlayerSettingsRepository::setExternalPlayerForwardSubtitles,
+                        )
+                    }
+                    if (autoPlayPlayerSettings.externalPlayerEnabled) {
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsSwitchRow(
+                            title = stringResource(Res.string.settings_playback_external_player_send_skip_segments),
+                            description = stringResource(Res.string.settings_playback_external_player_send_skip_segments_description),
+                            checked = autoPlayPlayerSettings.externalPlayerSendSkipSegments,
+                            isTablet = isTablet,
+                            onCheckedChange = PlayerSettingsRepository::setExternalPlayerSendSkipSegments,
+                        )
+                    }
                 }
-                if (!isIos && autoPlayPlayerSettings.externalPlayerEnabled) {
+                if (!isDesktop) {
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsSwitchRow(
-                        title = stringResource(Res.string.settings_playback_external_player_forward_subtitles),
-                        description = stringResource(Res.string.settings_playback_external_player_forward_subtitles_description),
-                        checked = autoPlayPlayerSettings.externalPlayerForwardSubtitles,
+                        title = stringResource(Res.string.settings_playback_touch_gestures),
+                        description = stringResource(Res.string.settings_playback_touch_gestures_description),
+                        checked = touchGesturesEnabled,
+                        enabled = !autoPlayPlayerSettings.externalPlayerEnabled,
                         isTablet = isTablet,
-                        onCheckedChange = PlayerSettingsRepository::setExternalPlayerForwardSubtitles,
+                        onCheckedChange = PlayerSettingsRepository::setTouchGesturesEnabled,
                     )
-                }
-                SettingsGroupDivider(isTablet = isTablet)
-                SettingsSwitchRow(
-                    title = stringResource(Res.string.settings_playback_touch_gestures),
-                    description = stringResource(Res.string.settings_playback_touch_gestures_description),
-                    checked = touchGesturesEnabled,
-                    enabled = !autoPlayPlayerSettings.externalPlayerEnabled,
-                    isTablet = isTablet,
-                    onCheckedChange = PlayerSettingsRepository::setTouchGesturesEnabled,
-                )
-                SettingsGroupDivider(isTablet = isTablet)
-                SettingsSwitchRow(
-                    title = stringResource(Res.string.settings_playback_hold_to_speed),
-                    description = stringResource(Res.string.settings_playback_hold_to_speed_description),
-                    checked = holdToSpeedEnabled,
-                    enabled = !autoPlayPlayerSettings.externalPlayerEnabled,
-                    isTablet = isTablet,
-                    onCheckedChange = PlayerSettingsRepository::setHoldToSpeedEnabled,
-                )
-                if (holdToSpeedEnabled && !autoPlayPlayerSettings.externalPlayerEnabled) {
                     SettingsGroupDivider(isTablet = isTablet)
-                    SettingsNavigationRow(
-                        title = stringResource(Res.string.settings_playback_hold_speed),
-                        description = formatPlaybackSpeedLabel(holdToSpeedValue),
+                    SettingsSwitchRow(
+                        title = stringResource(Res.string.settings_playback_hold_to_speed),
+                        description = stringResource(Res.string.settings_playback_hold_to_speed_description),
+                        checked = holdToSpeedEnabled,
+                        enabled = !autoPlayPlayerSettings.externalPlayerEnabled,
                         isTablet = isTablet,
-                        onClick = { showHoldToSpeedValueDialog = true },
+                        onCheckedChange = PlayerSettingsRepository::setHoldToSpeedEnabled,
                     )
+                    if (holdToSpeedEnabled && !autoPlayPlayerSettings.externalPlayerEnabled) {
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsNavigationRow(
+                            title = stringResource(Res.string.settings_playback_hold_speed),
+                            description = formatPlaybackSpeedLabel(holdToSpeedValue),
+                            isTablet = isTablet,
+                            onClick = { showHoldToSpeedValueDialog = true },
+                        )
+                    }
                 }
             }
         }
@@ -404,6 +441,7 @@ private fun PlaybackSettingsSection(
                     description = when (preferredAudioLanguage) {
                         AudioLanguageOption.DEFAULT -> stringResource(Res.string.settings_playback_option_default)
                         AudioLanguageOption.DEVICE -> stringResource(Res.string.settings_playback_option_device_language)
+                        AudioLanguageOption.ORIGINAL -> stringResource(Res.string.settings_playback_option_original)
                         else -> languageLabelForCode(preferredAudioLanguage)
                     },
                     enabled = audioLanguageEnabled,
@@ -487,7 +525,7 @@ private fun PlaybackSettingsSection(
                     title = stringResource(Res.string.settings_playback_subtitle_size),
                     value = subtitleStyle.fontSizeSp,
                     valueText = stringResource(Res.string.compose_player_font_size_value, subtitleStyle.fontSizeSp),
-                    valueRange = 12..40,
+                    valueRange = subtitleFontSizeRangeSp,
                     step = 2,
                     isTablet = isTablet,
                     enabled = subtitleRenderingEnabled,
@@ -556,7 +594,8 @@ private fun PlaybackSettingsSection(
                         onClick = { showSubtitleOutlineColorDialog = true },
                     )
                 }
-                if (!isIos) {
+                val showLibassSettings = !isIos && androidPlaybackEngine != AndroidPlaybackEngine.Libmpv
+                if (showLibassSettings) {
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsSwitchRow(
                         title = stringResource(Res.string.settings_playback_enable_libass),
@@ -761,15 +800,54 @@ private fun PlaybackSettingsSection(
 
         if (!isIos) {
             val decoderEnabled = !autoPlayPlayerSettings.externalPlayerEnabled
+            val exoOptionsEnabled = decoderEnabled && androidPlaybackEngine != AndroidPlaybackEngine.Libmpv
+            val libmpvOptionsVisible = androidPlaybackEngine != AndroidPlaybackEngine.ExoPlayer
+            val libmpvOptionsEnabled = decoderEnabled && libmpvOptionsVisible
             SettingsSection(
                 title = stringResource(Res.string.settings_playback_section_decoder),
                 isTablet = isTablet,
             ) {
                 SettingsGroup(isTablet = isTablet) {
                     SettingsNavigationRow(
+                        title = stringResource(Res.string.settings_playback_engine),
+                        description = androidPlaybackEngine.label,
+                        enabled = decoderEnabled,
+                        isTablet = isTablet,
+                        onClick = { showPlaybackEngineDialog = true },
+                    )
+                    if (libmpvOptionsVisible) {
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsNavigationRow(
+                            title = stringResource(Res.string.settings_playback_libmpv_video_output),
+                            description = androidLibmpvVideoOutput.label,
+                            enabled = libmpvOptionsEnabled,
+                            isTablet = isTablet,
+                            onClick = { showLibmpvVideoOutputDialog = true },
+                        )
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsSwitchRow(
+                            title = stringResource(Res.string.settings_playback_libmpv_hardware_decoding),
+                            description = stringResource(Res.string.settings_playback_libmpv_hardware_decoding_description),
+                            checked = androidLibmpvHardwareDecodingEnabled,
+                            enabled = libmpvOptionsEnabled,
+                            isTablet = isTablet,
+                            onCheckedChange = PlayerSettingsRepository::setAndroidLibmpvHardwareDecodingEnabled,
+                        )
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsSwitchRow(
+                            title = stringResource(Res.string.settings_playback_libmpv_yuv420p),
+                            description = stringResource(Res.string.settings_playback_libmpv_yuv420p_description),
+                            checked = androidLibmpvYuv420pEnabled,
+                            enabled = libmpvOptionsEnabled,
+                            isTablet = isTablet,
+                            onCheckedChange = PlayerSettingsRepository::setAndroidLibmpvYuv420pEnabled,
+                        )
+                    }
+                    SettingsGroupDivider(isTablet = isTablet)
+                    SettingsNavigationRow(
                         title = stringResource(Res.string.settings_playback_decoder_priority),
                         description = decoderPriorityLabel(decoderPriority),
-                        enabled = decoderEnabled,
+                        enabled = exoOptionsEnabled,
                         isTablet = isTablet,
                         onClick = { showDecoderPriorityDialog = true },
                     )
@@ -778,7 +856,7 @@ private fun PlaybackSettingsSection(
                         title = stringResource(Res.string.settings_playback_map_dv7_to_hevc),
                         description = stringResource(Res.string.settings_playback_map_dv7_to_hevc_description),
                         checked = mapDV7ToHevc,
-                        enabled = decoderEnabled,
+                        enabled = exoOptionsEnabled,
                         isTablet = isTablet,
                         onCheckedChange = PlayerSettingsRepository::setMapDV7ToHevc,
                     )
@@ -787,9 +865,26 @@ private fun PlaybackSettingsSection(
                         title = stringResource(Res.string.settings_playback_tunneled_playback),
                         description = stringResource(Res.string.settings_playback_tunneled_playback_description),
                         checked = tunnelingEnabled,
-                        enabled = decoderEnabled,
+                        enabled = exoOptionsEnabled,
                         isTablet = isTablet,
                         onCheckedChange = PlayerSettingsRepository::setTunnelingEnabled,
+                    )
+                }
+            }
+        }
+
+        if (isWindows) {
+            SettingsSection(
+                title = stringResource(Res.string.settings_playback_nvidia_rtx_video_section),
+                isTablet = isTablet,
+            ) {
+                SettingsGroup(isTablet = isTablet) {
+                    SettingsSwitchRow(
+                        title = stringResource(Res.string.settings_playback_nvidia_rtx_super_resolution),
+                        description = stringResource(Res.string.settings_playback_nvidia_rtx_super_resolution_desc),
+                        checked = autoPlayPlayerSettings.nvidiaRtxSuperResolutionEnabled,
+                        isTablet = isTablet,
+                        onCheckedChange = PlayerSettingsRepository::setNvidiaRtxSuperResolutionEnabled,
                     )
                 }
             }
@@ -1090,11 +1185,13 @@ private fun PlaybackSettingsSection(
     }
 
     if (showPreferredAudioDialog) {
+        val originalHint = stringResource(Res.string.settings_playback_option_original_hint)
         LanguageSelectionDialog(
             title = stringResource(Res.string.settings_playback_preferred_audio_language),
             options = listOf(
                 LanguageSelectionOption(AudioLanguageOption.DEFAULT, stringResource(Res.string.settings_playback_option_default)),
                 LanguageSelectionOption(AudioLanguageOption.DEVICE, stringResource(Res.string.settings_playback_option_device_language)),
+                LanguageSelectionOption(AudioLanguageOption.ORIGINAL, stringResource(Res.string.settings_playback_option_original), description = originalHint),
             ) + AvailableLanguageOptions.map { option ->
                 LanguageSelectionOption(option.code, stringResource(option.labelRes))
             },
@@ -1108,10 +1205,12 @@ private fun PlaybackSettingsSection(
     }
 
     if (showSecondaryAudioDialog) {
+        val originalHint = stringResource(Res.string.settings_playback_option_original_hint)
         LanguageSelectionDialog(
             title = stringResource(Res.string.settings_playback_secondary_audio_language),
             options = listOf(
                 LanguageSelectionOption(null, stringResource(Res.string.settings_playback_option_none)),
+                LanguageSelectionOption(AudioLanguageOption.ORIGINAL, stringResource(Res.string.settings_playback_option_original), description = originalHint),
             ) + AvailableLanguageOptions.map { option ->
                 LanguageSelectionOption(option.code, stringResource(option.labelRes))
             },
@@ -1266,6 +1365,32 @@ private fun PlaybackSettingsSection(
         )
     }
 
+    if (showPlaybackEngineDialog) {
+        PlaybackEngineDialog(
+            selectedEngine = androidPlaybackEngine,
+            onEngineSelected = { engine ->
+                PlayerSettingsRepository.setAndroidPlaybackEngine(engine)
+                showPlaybackEngineDialog = false
+            },
+            onDismiss = { showPlaybackEngineDialog = false },
+        )
+    }
+
+    if (showLibmpvVideoOutputDialog) {
+        IosEnumSelectionDialog(
+            title = stringResource(Res.string.settings_playback_libmpv_video_output_dialog),
+            options = AndroidLibmpvVideoOutput.entries,
+            selected = androidLibmpvVideoOutput,
+            label = { it.label },
+            description = { it.description },
+            onSelect = {
+                PlayerSettingsRepository.setAndroidLibmpvVideoOutput(it)
+                showLibmpvVideoOutputDialog = false
+            },
+            onDismiss = { showLibmpvVideoOutputDialog = false },
+        )
+    }
+
     if (showHoldToSpeedValueDialog) {
         HoldToSpeedValueDialog(
             selectedSpeed = holdToSpeedValue,
@@ -1294,7 +1419,7 @@ private fun PlaybackSettingsSection(
     if (showIosAudioOutputDialog) {
         IosEnumSelectionDialog(
             title = stringResource(Res.string.settings_playback_ios_audio_output_dialog),
-            options = IosAudioOutputMode.entries,
+            options = IosAudioOutputMode.selectableEntries,
             selected = autoPlayPlayerSettings.iosAudioOutputMode,
             label = { it.label },
             description = {
@@ -1441,6 +1566,7 @@ private fun formatReuseCacheDuration(hours: Int): String = when {
 private data class LanguageSelectionOption(
     val value: String?,
     val label: String,
+    val description: String? = null,
 )
 
 @Composable
@@ -1720,12 +1846,20 @@ private fun LanguageSelectionDialog(
                                     .padding(horizontal = 14.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text(
-                                    text = option.label,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.weight(1f),
-                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = option.label,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    if (!option.description.isNullOrBlank()) {
+                                        Text(
+                                            text = option.description,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
                                 Box(
                                     modifier = Modifier.size(24.dp),
                                     contentAlignment = Alignment.Center,
@@ -1927,6 +2061,99 @@ private fun DecoderPriorityDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun PlaybackEngineDialog(
+    selectedEngine: AndroidPlaybackEngine,
+    onEngineSelected: (AndroidPlaybackEngine) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val descriptions = mapOf(
+        AndroidPlaybackEngine.Auto to Res.string.settings_playback_engine_auto_description,
+        AndroidPlaybackEngine.ExoPlayer to Res.string.settings_playback_engine_exoplayer_description,
+        AndroidPlaybackEngine.Libmpv to Res.string.settings_playback_engine_libmpv_description,
+    )
+
+    BasicAlertDialog(
+        onDismissRequest = onDismiss,
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = stringResource(Res.string.settings_playback_engine),
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                )
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    AndroidPlaybackEngine.entries.forEach { engine ->
+                        val isSelected = engine == selectedEngine
+                        val containerColor = if (isSelected) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                        }
+
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onEngineSelected(engine) },
+                            shape = RoundedCornerShape(14.dp),
+                            color = containerColor,
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    Text(
+                                        text = engine.label,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        text = stringResource(descriptions.getValue(engine)),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Box(
+                                    modifier = Modifier.size(24.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Check,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
